@@ -1,0 +1,2023 @@
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { 
+  LayoutDashboard, 
+  Upload, 
+  Wallet, 
+  Package, 
+  TrendingUp, 
+  AlertTriangle, 
+  PlusCircle, 
+  FileText,
+  DollarSign,
+  Save,
+  History,
+  CheckCircle2,
+  Plus,
+  Minus,
+  Filter,
+  Check,
+  Ban,
+  Trash2,
+  Lock,
+  Unlock,
+  Info,
+  XCircle,
+  X,
+  Menu,
+  Store,
+  ArrowLeft,
+  Camera,
+  Loader2,
+  Receipt,
+  AlertCircle,
+  Zap,
+  ChevronRight,
+  Users
+} from 'lucide-react';
+
+// Firebase Imports
+import { initializeApp } from 'firebase/app';
+import { getAnalytics } from "firebase/analytics";
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  updateDoc, 
+  addDoc, 
+  deleteDoc,
+  onSnapshot, 
+  serverTimestamp 
+} from 'firebase/firestore';
+
+// --- API Key disediakan oleh persekitaran runtime ---
+const apiKey = ""; 
+
+// --- Firebase Setup ---
+let firebaseConfig;
+if (typeof __firebase_config !== 'undefined') {
+  firebaseConfig = JSON.parse(__firebase_config);
+} else {
+  firebaseConfig = {
+    apiKey: "AIzaSyAdE8cebXj4qox6s33f7ikrA9jyvXZ2fTA",
+    authDomain: "salestamtam-c40f0.firebaseapp.com",
+    projectId: "salestamtam-c40f0",
+    storageBucket: "salestamtam-c40f0.firebasestorage.app",
+    messagingSenderId: "373200023968",
+    appId: "1:373200023968:web:18e843716ca06b378ab4c5",
+    measurementId: "G-VC59MMG97Z"
+  };
+}
+
+const app = initializeApp(firebaseConfig);
+let analytics;
+try {
+  analytics = getAnalytics(app);
+} catch (e) {
+  console.warn("Analytics tidak disokong di dalam persekitaran ini.", e);
+}
+
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'tamtam-erp-default';
+
+// ============================================================================
+// KOMPONEN POP-UP RESITSCAN PRO
+// ============================================================================
+const ReceiptScannerProPopup = ({ isOpen, onClose, onApply }) => {
+  const [image, setImage] = useState(null);
+  const [base64Image, setBase64Image] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
+  const [error, setError] = useState(null);
+  const [scannedData, setScannedData] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [view, setView] = useState('scanner'); 
+  
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    try {
+      const savedHistory = localStorage.getItem('receipt_history_pro');
+      if (savedHistory) {
+        const parsed = JSON.parse(savedHistory);
+        setHistory(Array.isArray(parsed) ? parsed : []);
+      }
+    } catch (e) {
+      console.warn("Gagal memuatkan sejarah", e);
+      setHistory([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('receipt_history_pro', JSON.stringify(Array.isArray(history) ? history : []));
+  }, [history]);
+
+  const compressImage = (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (event) => {
+        const img = new Image();
+        img.src = event.target.result;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+
+          const MAX_SIZE = 1000;
+          if (width > height) {
+            if (width > MAX_SIZE) {
+              height *= MAX_SIZE / width;
+              width = MAX_SIZE;
+            }
+          } else {
+            if (height > MAX_SIZE) {
+              width *= MAX_SIZE / height;
+              height = MAX_SIZE;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+          
+          const compressedBase64 = canvas.toDataURL('image/jpeg', 0.6);
+          resolve(compressedBase64);
+        };
+      };
+    });
+  };
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setIsCompressing(true);
+      setError(null);
+      try {
+        const compressed = await compressImage(file);
+        setImage(compressed);
+        setBase64Image(compressed.split(',')[1]);
+        setScannedData(null);
+      } catch (err) {
+        setError("Gagal memproses imej. Sila gunakan format yang sah.");
+      } finally {
+        setIsCompressing(false);
+      }
+    }
+  };
+
+  const processReceipt = async () => {
+    if (!base64Image) return;
+    setLoading(true);
+    setError(null);
+
+    const systemPrompt = `Analyze receipt. Return ONLY JSON:
+    {
+      "merchant": "Store Name",
+      "date": "YYYY-MM-DD",
+      "items": [{"description": "Item name", "price": 0.00}],
+      "total": 0.00,
+      "currency": "RM"
+    }`;
+
+    const payload = {
+      contents: [{
+        role: "user",
+        parts: [
+          { text: "Extract receipt data fast." },
+          { inlineData: { mimeType: "image/jpeg", data: base64Image } }
+        ]
+      }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      generationConfig: {
+        responseMimeType: "application/json",
+      }
+    };
+
+    const fetchWithRetry = async (retries = 0) => {
+      try {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+           const errorData = await response.json();
+           throw new Error(errorData.error?.message || 'API Error');
+        }
+        
+        const result = await response.json();
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+        
+        if (!text) throw new Error("Tiada data teks dikembalikan oleh AI.");
+
+        const cleanJsonText = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        return JSON.parse(cleanJsonText);
+      } catch (err) {
+        if (retries < 2) { 
+          await new Promise(res => setTimeout(res, 1000));
+          return fetchWithRetry(retries + 1);
+        }
+        throw err;
+      }
+    };
+
+    try {
+      const data = await fetchWithRetry();
+      setScannedData(data);
+    } catch (err) {
+      console.error("AI Error:", err);
+      setError(`AI Gagal Memproses: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveToHistory = () => {
+    if (!scannedData) return;
+    const newEntry = {
+      id: Date.now(),
+      ...scannedData,
+      image: image,
+      timestamp: new Date().toLocaleString('ms-MY')
+    };
+    
+    const currentHistory = Array.isArray(history) ? history : [];
+    setHistory([newEntry, ...currentHistory]);
+    
+    if (onApply) {
+      onApply(scannedData);
+    }
+
+    setScannedData(null);
+    setImage(null);
+    setBase64Image(null);
+    setView('history');
+
+    if (onClose) onClose();
+  };
+
+  const deleteHistoryItem = (id) => {
+    const currentHistory = Array.isArray(history) ? history : [];
+    setHistory(currentHistory.filter(item => item.id !== id));
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200 text-slate-900 font-sans selection:bg-indigo-100">
+      <div className="bg-[#F8FAFC] w-full max-w-5xl max-h-[90vh] rounded-[2rem] shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
+        <nav className="bg-white border-b border-slate-200 sticky top-0 z-20 px-6 py-4 flex justify-between items-center shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="bg-gradient-to-tr from-indigo-600 to-violet-500 p-2.5 rounded-xl shadow-lg shadow-indigo-200">
+              <Zap className="text-white w-5 h-5 fill-current" />
+            </div>
+            <div>
+              <h1 className="text-lg font-extrabold tracking-tight text-slate-800 leading-none">ResitScan Pro</h1>
+              <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest">Turbo Engine v2.5</span>
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-4">
+            <div className="hidden sm:flex bg-slate-100 p-1 rounded-2xl border border-slate-200">
+              <button 
+                onClick={() => setView('scanner')}
+                className={`px-5 py-2 rounded-xl text-sm font-bold transition-all ${view === 'scanner' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >Scanner</button>
+              <button 
+                onClick={() => setView('history')}
+                className={`px-5 py-2 rounded-xl text-sm font-bold transition-all ${view === 'history' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+              >Laporan</button>
+            </div>
+            <button onClick={onClose} className="p-2 hover:bg-rose-50 text-slate-400 hover:text-rose-500 rounded-full transition-colors"><X size={24} /></button>
+          </div>
+        </nav>
+
+        <div className="w-full sm:hidden flex bg-white px-4 py-2 border-b border-slate-200 shrink-0">
+          <div className="flex w-full bg-slate-100 p-1 rounded-2xl border border-slate-200">
+            <button onClick={() => setView('scanner')} className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${view === 'scanner' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}>Scanner</button>
+            <button onClick={() => setView('history')} className={`flex-1 py-2 rounded-xl text-sm font-bold transition-all ${view === 'history' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}>Laporan</button>
+          </div>
+        </div>
+
+        <main className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar">
+          {view === 'scanner' ? (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+              <div className="lg:col-span-5 space-y-6">
+                <div className="bg-white p-2 rounded-[2rem] border border-slate-200 shadow-xl shadow-slate-200/50">
+                  <div className="p-6">
+                    <div className="flex items-center justify-between mb-6">
+                      <h2 className="text-xl font-bold text-slate-800">Tangkap Resit</h2>
+                      <div className="bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full text-[10px] font-black flex items-center gap-1"><Zap size={12} /> FAST OCR</div>
+                    </div>
+                    
+                    {!image && !isCompressing ? (
+                      <div onClick={() => fileInputRef.current.click()} className="border-2 border-dashed border-slate-200 rounded-[1.5rem] p-12 flex flex-col items-center justify-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/30 transition-all group relative overflow-hidden">
+                        <div className="bg-indigo-50 p-5 rounded-3xl mb-4 group-hover:scale-110 transition-transform duration-300"><Camera className="w-10 h-10 text-indigo-500" /></div>
+                        <p className="text-slate-700 font-bold">Tekan untuk muat naik</p>
+                        <p className="text-slate-400 text-xs mt-2 text-center px-4">Imej akan dioptimumkan automatik.</p>
+                        <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" capture="environment" className="hidden" />
+                      </div>
+                    ) : isCompressing ? (
+                      <div className="border-2 border-dashed border-indigo-100 bg-indigo-50/50 rounded-[1.5rem] p-12 flex flex-col items-center justify-center animate-pulse">
+                        <Loader2 className="animate-spin text-indigo-500 mb-4" size={40} />
+                        <p className="text-indigo-700 font-bold">Mengecilkan Saiz...</p>
+                      </div>
+                    ) : (
+                      <div className="relative rounded-[1.5rem] overflow-hidden bg-slate-900 border border-slate-200 aspect-[3/4] shadow-inner">
+                        <img src={image} alt="Preview" className="w-full h-full object-contain" />
+                        <button onClick={() => { setImage(null); setBase64Image(null); setScannedData(null); }} className="absolute top-4 right-4 bg-white/20 backdrop-blur-md text-white p-2.5 rounded-full hover:bg-red-500 transition-all border border-white/20"><X size={20} /></button>
+                      </div>
+                    )}
+
+                    {image && !scannedData && !loading && (
+                      <button onClick={processReceipt} className="w-full mt-6 bg-slate-900 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-3 hover:bg-indigo-600 active:scale-95 transition-all shadow-xl shadow-slate-200">
+                        Mula Imbasan Pantas <ChevronRight size={20} />
+                      </button>
+                    )}
+
+                    {loading && (
+                      <div className="w-full mt-6 bg-indigo-50 text-indigo-600 py-4 rounded-2xl font-bold flex items-center justify-center gap-3 border border-indigo-100">
+                        <Loader2 className="animate-spin" size={20} /> AI Sedang Membaca...
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {error && (
+                  <div className="bg-rose-50 border border-rose-100 text-rose-700 p-5 rounded-2xl flex items-start gap-4 animate-in fade-in zoom-in-95">
+                    <AlertCircle className="shrink-0 mt-0.5 text-rose-500" size={24} />
+                    <div><p className="font-bold">Masalah Dikesan</p><p className="text-sm opacity-90">{error}</p></div>
+                  </div>
+                )}
+              </div>
+
+              <div className="lg:col-span-7">
+                <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl shadow-slate-200/50 min-h-[500px] flex flex-col overflow-hidden">
+                  <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                    <div className="flex items-center gap-3"><FileText className="text-indigo-600" size={24} /><h2 className="text-xl font-extrabold text-slate-800">Data Pengekstrakan</h2></div>
+                    {scannedData && <span className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full text-[10px] font-black uppercase">Ready to Save</span>}
+                  </div>
+
+                  {!scannedData && !loading && (
+                    <div className="flex-1 flex flex-col items-center justify-center text-center p-12">
+                      <div className="bg-slate-50 p-8 rounded-full mb-6"><Receipt size={64} className="text-slate-200" /></div>
+                      <h3 className="text-lg font-bold text-slate-700">Menunggu Imbasan</h3>
+                      <p className="text-slate-400 text-sm max-w-[280px] mt-2">Sila muat naik imej resit di sebelah untuk memulakan pengekstrakan data automatik.</p>
+                    </div>
+                  )}
+
+                  {loading && (
+                    <div className="flex-1 p-8 space-y-8 animate-pulse">
+                      <div className="grid grid-cols-2 gap-4"><div className="h-16 bg-slate-100 rounded-2xl" /><div className="h-16 bg-slate-100 rounded-2xl" /></div>
+                      <div className="space-y-4"><div className="h-4 bg-slate-100 rounded-full w-1/4" /><div className="h-32 bg-slate-50 rounded-2xl" /></div>
+                      <div className="h-20 bg-slate-100 rounded-2xl" />
+                    </div>
+                  )}
+
+                  {scannedData && (
+                    <div className="flex-1 p-8 flex flex-col animate-in fade-in duration-500">
+                      <div className="grid grid-cols-2 gap-6 mb-8">
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase tracking-widest font-black text-slate-400">Merchant / Pembekal</label>
+                          <div className="text-lg font-bold text-slate-800 truncate border-b-2 border-indigo-50 pb-1">{typeof scannedData.merchant === 'object' ? JSON.stringify(scannedData.merchant) : scannedData.merchant || 'Tiada Nama'}</div>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] uppercase tracking-widest font-black text-slate-400">Tarikh Urusniaga</label>
+                          <div className="text-lg font-bold text-slate-800 border-b-2 border-indigo-50 pb-1">{typeof scannedData.date === 'object' ? JSON.stringify(scannedData.date) : scannedData.date || 'N/A'}</div>
+                        </div>
+                      </div>
+
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between mb-4"><label className="text-[10px] uppercase tracking-widest font-black text-slate-400">Senarai Perolehan</label><span className="text-xs font-bold text-slate-400">{Array.isArray(scannedData.items) ? scannedData.items.length : 0} items</span></div>
+                        <div className="bg-slate-50 rounded-2xl p-4 border border-slate-100 max-h-[250px] overflow-y-auto custom-scrollbar">
+                          <table className="w-full text-sm">
+                            <tbody className="divide-y divide-slate-100">
+                              {(Array.isArray(scannedData.items) ? scannedData.items : []).map((item, idx) => (
+                                <tr key={idx} className="group">
+                                  <td className="py-3 pr-3 text-slate-700 font-medium group-hover:text-indigo-600 transition-colors">{typeof item.description === 'object' ? JSON.stringify(item.description) : item.description}</td>
+                                  <td className="py-3 pl-3 text-right font-mono font-bold text-slate-900">{typeof scannedData.currency === 'object' ? JSON.stringify(scannedData.currency) : scannedData.currency || 'RM'} {Number(item.price || 0).toFixed(2)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div className="mt-8 pt-8 border-t-2 border-dashed border-slate-100 flex flex-col md:flex-row justify-between items-center md:items-end gap-4">
+                        <div className="text-center md:text-left">
+                          <p className="text-slate-400 text-xs font-black uppercase tracking-widest mb-1">Jumlah Bayaran</p>
+                          <p className="text-4xl font-black text-indigo-600 font-mono tracking-tighter">{typeof scannedData.currency === 'object' ? JSON.stringify(scannedData.currency) : scannedData.currency || 'RM'} {Number(scannedData.total || 0).toFixed(2)}</p>
+                        </div>
+                        <button onClick={saveToHistory} className="bg-indigo-600 text-white w-full md:w-auto px-8 py-4 rounded-2xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 transition-all shadow-xl shadow-indigo-100 group active:scale-95"><Save className="group-hover:scale-110 transition-transform hidden sm:block" />Simpan & Pindah Borang</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex items-center gap-5">
+                  <div className="bg-indigo-50 p-4 rounded-2xl text-indigo-600"><TrendingUp size={24} /></div>
+                  <div><p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Total Belanja</p><p className="text-2xl font-black text-slate-800 font-mono">RM {(Array.isArray(history) ? history : []).reduce((acc, curr) => acc + Number(curr.total || 0), 0).toFixed(2)}</p></div>
+                </div>
+                <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm flex items-center gap-5">
+                  <div className="bg-emerald-50 p-4 rounded-2xl text-emerald-600"><Receipt size={24} /></div>
+                  <div><p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Resit Direkod</p><p className="text-2xl font-black text-slate-800 font-mono">{(Array.isArray(history) ? history : []).length}</p></div>
+                </div>
+              </div>
+
+              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl shadow-slate-200/50 overflow-hidden">
+                <div className="p-8 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
+                  <h2 className="text-2xl font-black text-slate-800">Senarai Arkib</h2>
+                </div>
+
+                {(!history || history.length === 0) ? (
+                  <div className="p-24 text-center">
+                    <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6"><History size={32} className="text-slate-200" /></div>
+                    <h3 className="text-lg font-bold text-slate-700">Tiada Rekod Tersimpan</h3>
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100">
+                    {(Array.isArray(history) ? history : []).map((item) => (
+                      <div key={item.id} className="p-6 md:p-8 flex flex-col md:flex-row gap-6 hover:bg-indigo-50/20 transition-all group">
+                        <div className="w-24 h-32 md:w-28 md:h-36 bg-slate-100 rounded-2xl shrink-0 overflow-hidden border border-slate-200 shadow-sm group-hover:shadow-md transition-shadow">
+                          <img src={item.image} alt="Receipt thumbnail" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="flex-1 flex flex-col md:flex-row justify-between gap-6">
+                          <div className="space-y-4">
+                            <div>
+                              <h3 className="text-xl font-extrabold text-slate-800 group-hover:text-indigo-600 transition-colors">{typeof item.merchant === 'object' ? JSON.stringify(item.merchant) : item.merchant}</h3>
+                              <div className="flex items-center gap-4 text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                                <span className="flex items-center gap-1.5"><FileText size={12} /> {typeof item.date === 'object' ? JSON.stringify(item.date) : item.date}</span>
+                                <span className="flex items-center gap-1.5 text-emerald-600"><CheckCircle2 size={12} /> Tersimpan</span>
+                              </div>
+                            </div>
+                            
+                            <div className="flex flex-wrap gap-2">
+                              {(Array.isArray(item.items) ? item.items : []).slice(0, 3).map((li, i) => (
+                                <span key={i} className="px-3 py-1 bg-slate-100 text-slate-600 text-[10px] font-bold rounded-lg border border-slate-200">{typeof li.description === 'object' ? JSON.stringify(li.description) : li.description}</span>
+                              ))}
+                              {(Array.isArray(item.items) ? item.items : []).length > 3 && (
+                                <span className="px-3 py-1 bg-indigo-50 text-indigo-600 text-[10px] font-bold rounded-lg border border-indigo-100">+{(item.items || []).length - 3} item lagi</span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col items-start md:items-end justify-between min-w-[150px]">
+                            <div className="text-left md:text-right w-full flex justify-between md:block">
+                              <div>
+                                <p className="text-3xl font-black text-slate-900 font-mono tracking-tighter">{typeof item.currency === 'object' ? JSON.stringify(item.currency) : item.currency || 'RM'} {Number(item.total || 0).toFixed(2)}</p>
+                                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">{item.timestamp}</p>
+                              </div>
+                              <div className="flex gap-2 items-center md:items-end">
+                                <button onClick={() => deleteHistoryItem(item.id)} className="text-slate-300 hover:text-rose-500 p-2.5 hover:bg-rose-50 rounded-xl transition-all"><Trash2 size={20} /></button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+};
+// ============================================================================
+// TAMAT KOMPONEN RESITSCAN PRO
+// ============================================================================
+
+// MAIN APP (TAM-TAM ERP)
+const App = () => {
+  // Branch Selection State
+  const [selectedBranch, setSelectedBranch] = useState(null); // 'tamtam' | 'ayam'
+
+  const [activeTab, setActiveTab] = useState('overview');
+  const [user, setUser] = useState(null);
+  
+  // --- KEMASKINI GLOBAL CASHFLOW DATA ---
+  const [salesTamTam, setSalesTamTam] = useState([]);
+  const [salesAyam, setSalesAyam] = useState([]);
+  const [expTamTam, setExpTamTam] = useState([]);
+  const [expAyam, setExpAyam] = useState([]);
+  const [transfersData, setTransfersData] = useState([]);
+
+  // Data mapping untuk branch view
+  const salesData = selectedBranch === 'tamtam' ? salesTamTam : salesAyam;
+  const expensesData = selectedBranch === 'tamtam' ? expTamTam : expAyam;
+
+  const [inventory, setInventory] = useState([]);
+  const [stockLogs, setStockLogs] = useState([]);
+  
+  // Mobile UI State
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  // States for Global Input Form (Front Page)
+  const [globalInputTab, setGlobalInputTab] = useState('sales'); // 'sales' | 'expenses' | 'transfers'
+  const [successMsg, setSuccessMsg] = useState(null);
+
+  // States for Import CSV
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [pendingSyncData, setPendingSyncData] = useState(null);
+  const fileInputRef = useRef(null);
+  const [importDate, setImportDate] = useState(new Date().toISOString().split('T')[0]);
+
+  // States for Manual Inputs
+  const [manualStockInputs, setManualStockInputs] = useState({});
+  
+  // Borang Jualan & Belanja & Transfer
+  const [formSales, setFormSales] = useState({
+    date: new Date().toISOString().split('T')[0],
+    walkin: '', panda: '', grab: '', misi: '', target: 'tamtam'
+  });
+
+  const [formExpense, setFormExpense] = useState({
+    date: new Date().toISOString().split('T')[0],
+    category: 'Kos Mentah (COGS)', amount: '', description: '', target: 'tamtam', payment_method: 'cash'
+  });
+
+  const [formTransfer, setFormTransfer] = useState({
+    date: new Date().toISOString().split('T')[0],
+    type: 'modal_bros_to_tamtam', amount: '', description: '', payer: '', payerOption: ''
+  });
+
+  // Panggilan ke ResitScan Pro
+  const [isScannerModalOpen, setIsScannerModalOpen] = useState(false);
+
+  // States for Inventory Management
+  const [newInventoryItem, setNewInventoryItem] = useState({ name: '', stock: '', unit: '' });
+  const [inventoryToDelete, setInventoryToDelete] = useState(null);
+
+  // Error & Confirmation States
+  const [saleToDelete, setSaleToDelete] = useState(null);
+  const [expenseToDelete, setExpenseToDelete] = useState(null);
+  const [transferToDelete, setTransferToDelete] = useState(null);
+  const [dbError, setDbError] = useState(null);
+  const [formError, setFormError] = useState(null); 
+
+  // 1. Auth Logic
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          try {
+            await signInWithCustomToken(auth, __initial_auth_token);
+          } catch (tokenError) {
+            console.warn("Token tersuai tidak sah, beralih ke log masuk tanpa nama...");
+            await signInAnonymously(auth);
+          }
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth Error:", error);
+        if (error.code === 'auth/configuration-not-found') {
+           setDbError("Modul Authentication belum diaktifkan untuk projek ini.");
+        } else {
+           setDbError(`Ralat Pengesahan: ${error.message}`);
+        }
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Data Fetching (GLOBAL)
+  useEffect(() => {
+    if (!user) return; 
+
+    const handleSnapshotError = (err) => {
+      console.error("Firestore Error:", err);
+      if (err.code === 'permission-denied') {
+        setDbError("Ralat Akses Pangkalan Data (Permission Denied). Sila kemas kini Firestore Security Rules anda.");
+      } else {
+        setDbError(err.message);
+      }
+    };
+
+    // FETCH SEMUA DATA SECARA GLOBAL UNTUK CASHFLOW
+    const unsubST = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'sales_tamtam'), (snap) => setSalesTamTam(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => new Date(a.date) - new Date(b.date))), handleSnapshotError);
+    const unsubSA = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'sales_ayam'), (snap) => setSalesAyam(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => new Date(a.date) - new Date(b.date))), handleSnapshotError);
+    const unsubET = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'expenses_tamtam'), (snap) => setExpTamTam(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => new Date(a.date) - new Date(b.date))), handleSnapshotError);
+    const unsubEA = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'expenses_ayam'), (snap) => setExpAyam(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => new Date(a.date) - new Date(b.date))), handleSnapshotError);
+    const unsubTrans = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'wallet_transfers'), (snap) => setTransfersData(snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => new Date(a.date) - new Date(b.date))), handleSnapshotError);
+
+    return () => {
+      unsubST(); unsubSA(); unsubET(); unsubEA(); unsubTrans();
+    };
+  }, [user]);
+
+  // Data Fetching Khusus Branch (Inventory, Logs)
+  useEffect(() => {
+    if (!user || !selectedBranch) return; 
+
+    const handleSnapshotError = (err) => {
+      console.error("Firestore Error:", err);
+    };
+
+    setInventory([]);
+    setStockLogs([]);
+
+    const colSuffix = `_${selectedBranch}`;
+
+    const invCol = collection(db, 'artifacts', appId, 'public', 'data', `inventory${colSuffix}`);
+    const unsubscribeInv = onSnapshot(invCol, (snapshot) => {
+      if (snapshot.empty) {
+        const initialInv = selectedBranch === 'tamtam' 
+          ? [
+              { item: 'Patty Daging', stock: 50, unit: 'pcs' },
+              { item: 'Roti Bun', stock: 45, unit: 'pcs' },
+              { item: 'Sos Black Pepper', stock: 5, unit: 'botol' },
+              { item: 'Cheese Slice', stock: 15, unit: 'keping' },
+            ]
+          : [
+              { item: 'Ayam Gunting', stock: 20, unit: 'keping' },
+              { item: 'Serbuk Pedas', stock: 5, unit: 'pek' },
+              { item: 'Serbuk Keju', stock: 5, unit: 'pek' },
+              { item: 'Lidi Kiosk', stock: 100, unit: 'pcs' },
+            ];
+        
+        initialInv.forEach(item => addDoc(invCol, item).catch(err => console.error(err)));
+      } else {
+        setInventory(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+      }
+    }, handleSnapshotError);
+
+    const logsCol = collection(db, 'artifacts', appId, 'public', 'data', `stockLogs${colSuffix}`);
+    const unsubscribeLogs = onSnapshot(logsCol, (snapshot) => {
+      const logs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      logs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+      setStockLogs(logs.slice(0, 10));
+    }, handleSnapshotError);
+
+    return () => {
+      unsubscribeInv();
+      unsubscribeLogs();
+    };
+  }, [user, selectedBranch]);
+
+  // --- 3. CASHFLOW WALLET CALCULATION (GLOBAL) ---
+  const wallets = useMemo(() => {
+    let tamtamCash = 0; let tamtamBank = 0;
+    let brosCash = 0; let raudhahBank = 0;
+
+    // Tambah Duit Masuk (Sales)
+    salesTamTam.forEach(s => {
+      tamtamCash += Number(s.walkin || 0); // Walk-in gabung Tunai/QR (Cash/TNG)
+      tamtamBank += Number(s.panda || 0) + Number(s.grab || 0) + Number(s.misi || 0); // Online -> Maybank (TamTam)
+    });
+    salesAyam.forEach(s => {
+      brosCash += Number(s.walkin || 0); // Walk-in (Cash & QR) -> Cash TNG (Bro's)
+      raudhahBank += Number(s.panda || 0) + Number(s.grab || 0) + Number(s.misi || 0); // Online -> Maybank Raudhah
+    });
+
+    // Tolak Duit Keluar (Expenses)
+    expTamTam.forEach(e => {
+      if (e.payment_method === 'bank') tamtamBank -= Number(e.amount || 0);
+      else tamtamCash -= Number(e.amount || 0); // default tunai
+    });
+    expAyam.forEach(e => {
+      if (e.payment_method === 'bank') raudhahBank -= Number(e.amount || 0);
+      else brosCash -= Number(e.amount || 0);
+    });
+
+    // Proses Pergerakan Pindahan (Transfers)
+    transfersData.forEach(t => {
+      const amt = Number(t.amount || 0);
+      switch(t.type) {
+        // --- SUNTIKAN MODAL (HUTANG) DARI BRO'S MART ---
+        case 'modal_bros_to_tamtam': 
+          brosCash -= amt; 
+          tamtamCash += amt; 
+          break;
+        case 'bayar_hutang_bros': 
+          tamtamCash -= amt; 
+          brosCash += amt; 
+          break;
+        // --- SUNTIKAN MODAL (HUTANG) DARI LUAR ---
+        case 'modal_luar_cash':
+          tamtamCash += amt; // Tambah tunai ke TamTam (tiada tolakan dari Bro's)
+          break;
+        case 'modal_luar_bank':
+          tamtamBank += amt;
+          break;
+        case 'bayar_hutang_luar':
+          tamtamCash -= amt; // Duit keluar bayar Entiti Luar
+          break;
+        case 'modal_luar_cash_bros':
+          brosCash += amt;
+          break;
+        case 'modal_luar_bank_bros':
+          raudhahBank += amt;
+          break;
+        case 'bayar_hutang_luar_bros':
+          brosCash -= amt;
+          break;
+        // -------------------------------
+        case 'bankin_tamtam': tamtamCash -= amt; tamtamBank += amt; break;
+        case 'bankin_bros': brosCash -= amt; raudhahBank += amt; break;
+        case 'settlement': raudhahBank -= amt; tamtamBank += amt; break; // if any legacy settlement remains
+        case 'draw_tamtam_cash': tamtamCash -= amt; break;
+        case 'draw_tamtam_bank': tamtamBank -= amt; break;
+        case 'draw_bros_cash': brosCash -= amt; break;
+        case 'draw_raudhah': raudhahBank -= amt; break;
+        default: break;
+      }
+    });
+
+    return { tamtamCash, tamtamBank, brosCash, raudhahBank };
+  }, [salesTamTam, salesAyam, expTamTam, expAyam, transfersData]);
+
+  // Kiraan Hutang Bro's & Luar
+  const hutangTamTam = useMemo(() => {
+     let hutang = 0;
+     transfersData.forEach(t => {
+        if (t.type === 'modal_bros_to_tamtam') hutang += Number(t.amount || 0);
+        if (t.type === 'bayar_hutang_bros') hutang -= Number(t.amount || 0);
+     });
+     return Math.max(0, hutang);
+  }, [transfersData]);
+
+  const hutangLuar = useMemo(() => {
+     let hutang = 0;
+     transfersData.forEach(t => {
+        if (t.type.startsWith('modal_luar')) hutang += Number(t.amount || 0);
+        if (t.type.startsWith('bayar_hutang_luar')) hutang -= Number(t.amount || 0);
+     });
+     return Math.max(0, hutang);
+  }, [transfersData]);
+
+  // Cipta Senarai Funder Luar Yang Unik
+  const uniqueFunders = useMemo(() => {
+      const funders = new Set();
+      transfersData.forEach(t => {
+          if (t.type.startsWith('modal_luar') || t.type.startsWith('bayar_hutang_luar')) {
+              let payerName = t.payer;
+              if (!payerName && t.description) {
+                  // Fallback untuk membaca nama payer dari rekod lama
+                  const match = t.description.match(/\[Entiti\/Funder:\s*(.*?)\]/);
+                  if (match) payerName = match[1];
+              }
+              if (payerName) funders.add(payerName.trim());
+          }
+      });
+      return Array.from(funders);
+  }, [transfersData]);
+
+  // Pecahan Mengikut Entiti Untuk Carta Hutang
+  const hutangLuarBreakdown = useMemo(() => {
+     const breakdown = {};
+     transfersData.forEach(t => {
+        if (t.type.startsWith('modal_luar') || t.type.startsWith('bayar_hutang_luar')) {
+           let payerName = t.payer;
+           if (!payerName && t.description) {
+               const match = t.description.match(/\[Entiti\/Funder:\s*(.*?)\]/);
+               if (match) payerName = match[1];
+           }
+           payerName = payerName ? payerName.trim() : 'Lain-lain';
+
+           if (!breakdown[payerName]) breakdown[payerName] = 0;
+           if (t.type.startsWith('modal_luar')) breakdown[payerName] += Number(t.amount || 0);
+           if (t.type.startsWith('bayar_hutang_luar')) breakdown[payerName] -= Number(t.amount || 0);
+        }
+     });
+     return Object.entries(breakdown)
+          .filter(([_, amt]) => amt > 0)
+          .map(([name, amount]) => ({name, amount}));
+  }, [transfersData]);
+
+  // 3. Consolidated Financial Calculations (P&L Branch View)
+  const stats = useMemo(() => {
+    let totalEarning = 0;
+    let totalExpense = 0;
+
+    (salesData || []).forEach(day => {
+      totalEarning += Number(day.walkin || 0) + Number(day.panda || 0) + Number(day.grab || 0) + Number(day.misi || 0);
+      totalExpense += Number(day.cogs || 0) + Number(day.opex || 0); 
+    });
+
+    (expensesData || []).forEach(exp => {
+      totalExpense += Number(exp.amount || 0);
+    });
+
+    let netProfit = totalEarning - totalExpense;
+
+    return { totalEarning, totalExpense, netProfit };
+  }, [salesData, expensesData]);
+
+  const monthlyStats = useMemo(() => {
+    const grouped = {};
+    
+    (salesData || []).forEach(sale => {
+      const month = sale.date.substring(0, 7); 
+      if (!grouped[month]) {
+        grouped[month] = { earning: 0, expense: 0, profit: 0, walkin: 0, apps: 0 };
+      }
+      const apps = Number(sale.panda || 0) + Number(sale.grab || 0) + Number(sale.misi || 0);
+      const dayWalkin = Number(sale.walkin || 0);
+      const dayEarning = dayWalkin + apps;
+      const legacyCost = Number(sale.cogs || 0) + Number(sale.opex || 0); 
+      
+      grouped[month].earning += dayEarning;
+      grouped[month].expense += legacyCost;
+      grouped[month].walkin += dayWalkin;
+      grouped[month].apps += apps;
+    });
+
+    (expensesData || []).forEach(exp => {
+      const month = exp.date.substring(0, 7);
+      if (!grouped[month]) {
+        grouped[month] = { earning: 0, expense: 0, profit: 0, walkin: 0, apps: 0 };
+      }
+      grouped[month].expense += Number(exp.amount || 0);
+    });
+    
+    Object.keys(grouped).forEach(m => {
+      grouped[m].profit = grouped[m].earning - grouped[m].expense;
+    });
+
+    return Object.entries(grouped)
+      .map(([month, data]) => ({ month, ...data }))
+      .sort((a, b) => b.month.localeCompare(a.month)); 
+  }, [salesData, expensesData]);
+
+  const handleActionError = (e) => {
+    console.error(e);
+    if (e.code === 'permission-denied') {
+      setDbError("Sistem dihalang untuk menyimpan data. Sila semak Firestore Security Rules anda.");
+    }
+  };
+
+  const handleAddInventoryItem = async () => {
+    if (!user) return;
+    if (!newInventoryItem.name || !newInventoryItem.unit) {
+      setFormError("Sila isikan Nama Item dan Unit Ukuran terlebih dahulu.");
+      setTimeout(() => setFormError(null), 3000); 
+      return;
+    }
+    try {
+      const invCol = collection(db, 'artifacts', appId, 'public', 'data', `inventory_${selectedBranch}`);
+      await addDoc(invCol, {
+        item: newInventoryItem.name,
+        stock: Number(newInventoryItem.stock || 0),
+        unit: newInventoryItem.unit
+      });
+      setNewInventoryItem({ name: '', stock: '', unit: '' });
+      setFormError(null);
+    } catch (err) { handleActionError(err); }
+  };
+
+  const confirmDeleteInventory = async () => {
+    if (!user || !inventoryToDelete) return;
+    try {
+        await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `inventory_${selectedBranch}`, inventoryToDelete));
+        setInventoryToDelete(null);
+    } catch (e) { handleActionError(e); }
+  };
+
+  const handleUpdateStockManual = async (itemId, currentStock, type) => {
+    if (!user) return;
+    
+    const rawInput = manualStockInputs[itemId];
+    const inputVal = (rawInput === undefined || rawInput === '') ? 1 : Number(rawInput);
+    if (inputVal <= 0) return;
+
+    const change = type === 'restock' ? inputVal : -inputVal;
+    const newStock = Math.max(0, currentStock + change);
+    
+    try {
+      const itemDoc = doc(db, 'artifacts', appId, 'public', 'data', `inventory_${selectedBranch}`, itemId);
+      await updateDoc(itemDoc, { stock: newStock });
+      const logsCol = collection(db, 'artifacts', appId, 'public', 'data', `stockLogs_${selectedBranch}`);
+      const item = inventory.find(i => i.id === itemId);
+      await addDoc(logsCol, { itemId, itemName: item.item, change, type, timestamp: serverTimestamp() });
+      setManualStockInputs(prev => ({ ...prev, [itemId]: '' }));
+    } catch (err) { handleActionError(err); }
+  };
+
+  const handleSaveSales = async () => {
+    if (!user) return;
+    try {
+      const targetBranch = formSales.target || 'tamtam';
+      const salesCol = collection(db, 'artifacts', appId, 'public', 'data', `sales_${targetBranch}`);
+      await addDoc(salesCol, {
+        date: formSales.date,
+        walkin: Number(formSales.walkin),
+        panda: Number(formSales.panda), grab: Number(formSales.grab), misi: Number(formSales.misi),
+        createdAt: new Date().toISOString()
+      });
+      const [year, month, day] = formSales.date.split('-').map(Number);
+      const nextDateObj = new Date(year, month - 1, day + 1);
+      const nextDateStr = `${nextDateObj.getFullYear()}-${String(nextDateObj.getMonth() + 1).padStart(2, '0')}-${String(nextDateObj.getDate()).padStart(2, '0')}`;
+
+      setFormSales({ date: nextDateStr, walkin: '', panda: '', grab: '', misi: '', target: targetBranch });
+      
+      setSuccessMsg(`Jualan ${targetBranch === 'tamtam' ? 'TamTam' : "Bro's Mart"} berjaya direkod!`);
+      setTimeout(() => setSuccessMsg(null), 3500);
+    } catch (e) { handleActionError(e); }
+  };
+
+  const handleSaveExpense = async () => {
+    if (!user || !formExpense.amount) {
+      setFormError("Sila masukkan jumlah RM perbelanjaan.");
+      setTimeout(() => setFormError(null), 3000);
+      return;
+    }
+    try {
+      const targetBranch = formExpense.target || 'tamtam';
+      const expCol = collection(db, 'artifacts', appId, 'public', 'data', `expenses_${targetBranch}`);
+      await addDoc(expCol, {
+        date: formExpense.date,
+        category: formExpense.category,
+        amount: Number(formExpense.amount),
+        description: formExpense.description,
+        payment_method: formExpense.payment_method,
+        createdAt: new Date().toISOString()
+      });
+
+      setFormExpense(prev => ({ ...prev, amount: '', description: '' }));
+      setSuccessMsg(`Belanja ${targetBranch === 'tamtam' ? 'TamTam' : "Bro's Mart"} berjaya direkod!`);
+      setTimeout(() => setSuccessMsg(null), 3500);
+    } catch (e) { handleActionError(e); }
+  };
+
+  const handleSaveTransfer = async () => {
+    if (!user || !formTransfer.amount) {
+      setFormError("Sila isikan amaun pindahan wang.");
+      setTimeout(() => setFormError(null), 3000);
+      return;
+    }
+    if ((formTransfer.type.startsWith('modal_luar') || formTransfer.type.startsWith('bayar_hutang_luar')) && !formTransfer.payer) {
+       setFormError("Sila pilih atau masukkan nama funder luar.");
+       setTimeout(() => setFormError(null), 3000);
+       return;
+    }
+    try {
+      let finalDesc = formTransfer.description;
+      if ((formTransfer.type.startsWith('modal_luar') || formTransfer.type.startsWith('bayar_hutang_luar')) && formTransfer.payer) {
+         finalDesc = `[Entiti/Funder: ${formTransfer.payer}] ${finalDesc}`;
+      }
+
+      const transCol = collection(db, 'artifacts', appId, 'public', 'data', 'wallet_transfers');
+      await addDoc(transCol, {
+        date: formTransfer.date,
+        type: formTransfer.type,
+        amount: Number(formTransfer.amount),
+        description: finalDesc,
+        payer: formTransfer.payer || '',
+        createdAt: new Date().toISOString()
+      });
+      setFormTransfer(prev => ({ ...prev, amount: '', description: '', payer: '', payerOption: '' }));
+      setSuccessMsg("Pindahan wang berjaya direkodkan!");
+      setTimeout(() => setSuccessMsg(null), 3500);
+    } catch (e) { handleActionError(e); }
+  };
+
+  const confirmDeleteSale = async () => {
+    if (!user || !saleToDelete) return;
+    try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `sales_${selectedBranch}`, saleToDelete)); setSaleToDelete(null); } catch (e) { handleActionError(e); }
+  };
+
+  const confirmDeleteExpense = async () => {
+    if (!user || !expenseToDelete) return;
+    try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `expenses_${selectedBranch}`, expenseToDelete)); setExpenseToDelete(null); } catch (e) { handleActionError(e); }
+  };
+  
+  const confirmDeleteTransfer = async () => {
+    if (!user || !transferToDelete) return;
+    try { await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wallet_transfers', transferToDelete)); setTransferToDelete(null); } catch (e) { handleActionError(e); }
+  };
+
+  const expectedCategory = selectedBranch === 'tamtam' ? 'BURGER' : 'KIOSK';
+  const handleFileChange = async (event) => {
+    const file = event.target.files[0];
+    if (!file || !user) return;
+    
+    setIsUploading(true);
+    setUploadSuccess(false);
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const text = e.target.result;
+      const lines = text.split('\n').filter(line => line.trim() !== '');
+      
+      if (lines.length < 2) {
+        setIsUploading(false);
+        return; 
+      }
+
+      const rawItems = [];
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(col => col.replace(/^"|"$/g, '').trim());
+        
+        if (cols.length >= 9) {
+          const itemName = cols[0]; 
+          const category = cols[2]; 
+          const netSales = parseFloat(cols[8].replace(/,/g, '')) || 0; 
+          
+          if (itemName) {
+             rawItems.push({ item: itemName, category: category, net_sales: netSales, channel: 'Walk-in' });
+          }
+        }
+      }
+
+      const branchItems = rawItems.filter(i => i.category && i.category.toUpperCase().includes(expectedCategory));
+      const excludedItems = rawItems.filter(i => !i.category || !i.category.toUpperCase().includes(expectedCategory));
+
+      const summary = {
+        date: importDate,
+        walkin: branchItems.reduce((s, i) => s + i.net_sales, 0),
+        panda: 0, grab: 0, misi: 0, cogs: 0, opex: 0, 
+        fileName: file.name
+      };
+
+      setPendingSyncData({ rawItems, branchItems, excludedItems, summary });
+      setIsUploading(false);
+      event.target.value = null; 
+    };
+    reader.readAsText(file);
+  };
+  
+  const handleConfirmSync = async () => {
+    if (!pendingSyncData || !user) return;
+    try {
+      setIsUploading(true);
+      const salesCol = collection(db, 'artifacts', appId, 'public', 'data', `sales_${selectedBranch}`);
+      await addDoc(salesCol, { 
+        ...pendingSyncData.summary,
+        source: `Loyverse: ${pendingSyncData.summary.fileName}`,
+        createdAt: new Date().toISOString()
+      });
+      setIsUploading(false);
+      setUploadSuccess(true);
+      setPendingSyncData(null);
+    } catch (e) { handleActionError(e); setIsUploading(false); }
+  };
+  
+  const triggerFileInput = () => fileInputRef.current?.click();
+
+  const switchTab = (tab) => {
+    setActiveTab(tab);
+    setIsMobileMenuOpen(false);
+  };
+
+  const handleLogoutBranch = () => {
+    setSelectedBranch(null);
+    setActiveTab('overview');
+  };
+
+  if (!user && !dbError) return (
+    <div className="h-screen flex items-center justify-center bg-slate-900 text-white font-sans relative overflow-hidden">
+      <div className="flex flex-col items-center gap-4 z-10 relative">
+        <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-slate-400 font-medium">Menghubungkan ke Cloud...</p>
+      </div>
+    </div>
+  );
+
+  // ============================================================================
+  // PANDANGAN GLOBAL (INPUT & SELECTION)
+  // ============================================================================
+  if (user && !selectedBranch && !dbError) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white font-sans relative overflow-y-auto custom-scrollbar flex flex-col items-center p-6 pb-20">
+
+        {/* Modal Scanner Pro Global */}
+        <ReceiptScannerProPopup 
+          isOpen={isScannerModalOpen} 
+          onClose={() => setIsScannerModalOpen(false)} 
+          onApply={(scannedData) => {
+            const itemsArr = Array.isArray(scannedData.items) ? scannedData.items : [];
+            const itemsText = itemsArr.map(i => typeof i.description === 'object' ? JSON.stringify(i.description) : i.description).join(', ');
+            const merchantText = typeof scannedData.merchant === 'object' ? JSON.stringify(scannedData.merchant) : scannedData.merchant;
+            const mergedDesc = `${merchantText ? merchantText + ' - ' : ''}${itemsText || ''}`.substring(0, 150);
+            
+            setFormExpense(prev => ({
+              ...prev,
+              amount: Number(scannedData.total || 0) || prev.amount,
+              description: mergedDesc
+            }));
+          }}
+        />
+        
+        <div className="z-10 relative w-full max-w-4xl text-center mt-4 md:mt-8">
+          <div className="flex justify-center items-center gap-3 mb-2">
+            <h1 className="text-4xl md:text-5xl font-black tracking-tighter text-white drop-shadow-lg">TamTam ERP</h1>
+          </div>
+          <p className="text-slate-400 mb-8 font-medium tracking-widest uppercase text-xs md:text-sm">Sistem Pemusatan Operasi & Aliran Tunai</p>
+          
+          {/* CARTA WALLET CASHFLOW GLOBAL */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-10 w-full animate-in slide-in-from-top-4 duration-500">
+             <div className="bg-slate-800/80 backdrop-blur-md border-t-2 border-slate-700/50 p-4 md:p-5 rounded-2xl md:rounded-[2rem] text-left shadow-lg border-l-4 border-l-blue-500">
+                <p className="text-[9px] md:text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Cash / TNG (TamTam)</p>
+                <p className="text-xl md:text-2xl font-black text-white tracking-tighter">RM {wallets.tamtamCash.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+             </div>
+             <div className="bg-slate-800/80 backdrop-blur-md border-t-2 border-slate-700/50 p-4 md:p-5 rounded-2xl md:rounded-[2rem] text-left shadow-lg border-l-4 border-l-orange-500">
+                <p className="text-[9px] md:text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Maybank (TamTam)</p>
+                <p className="text-xl md:text-2xl font-black text-white tracking-tighter">RM {wallets.tamtamBank.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+             </div>
+             <div className="bg-slate-800/80 backdrop-blur-md border-t-2 border-slate-700/50 p-4 md:p-5 rounded-2xl md:rounded-[2rem] text-left shadow-lg border-l-4 border-l-red-500">
+                <p className="text-[9px] md:text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Cash / TNG (Bro's Mart)</p>
+                <p className="text-xl md:text-2xl font-black text-white tracking-tighter">RM {wallets.brosCash.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+             </div>
+             <div className="bg-slate-800/80 backdrop-blur-md border-t-2 border-slate-700/50 p-4 md:p-5 rounded-2xl md:rounded-[2rem] text-left shadow-lg border-l-4 border-l-emerald-500">
+                <p className="text-[9px] md:text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Maybank Raudhah</p>
+                <p className="text-xl md:text-2xl font-black text-white tracking-tighter">RM {wallets.raudhahBank.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+             </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-2xl mx-auto mb-16">
+            <button 
+              onClick={() => { setSelectedBranch('tamtam'); setActiveTab('overview'); }} 
+              className="bg-slate-800/50 backdrop-blur-md border border-slate-700 hover:border-orange-500/50 rounded-[2rem] p-8 flex flex-col items-center justify-center transition-all duration-300 group hover:-translate-y-2 hover:shadow-[0_20px_40px_-15px_rgba(249,115,22,0.3)] active:scale-95"
+            >
+              <div className="w-24 h-24 md:w-32 md:h-32 rounded-[1.5rem] mb-6 overflow-hidden bg-black p-2 shadow-xl group-hover:scale-105 transition-transform duration-300">
+                 <img src="./tamtam-logo.jpg" alt="TamTam Burger" className="w-full h-full object-contain" onError={(e) => { e.target.onerror = null; e.target.src = 'https://ui-avatars.com/api/?name=T&background=000&color=fff&rounded=true'; }} />
+              </div>
+              <h2 className="text-xl md:text-2xl font-black tracking-tight text-white mb-2">Laporan TamTam</h2>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-orange-400 bg-orange-500/10 px-3 py-1 rounded-lg border border-orange-500/20">Buka Dashboard</span>
+            </button>
+
+            <button 
+              onClick={() => { setSelectedBranch('ayam'); setActiveTab('overview'); }} 
+              className="bg-slate-800/50 backdrop-blur-md border border-slate-700 hover:border-red-500/50 rounded-[2rem] p-8 flex flex-col items-center justify-center transition-all duration-300 group hover:-translate-y-2 hover:shadow-[0_20px_40px_-15px_rgba(220,38,38,0.3)] active:scale-95"
+            >
+              <div className="w-24 h-24 md:w-32 md:h-32 rounded-[1.5rem] mb-6 overflow-hidden bg-black shadow-xl group-hover:scale-105 transition-transform duration-300 flex items-center justify-center relative border border-slate-800">
+                 <img src="./brosmart-logo.jpg" alt="Bro's Mart" className="w-full h-full object-cover" onError={(e) => { e.target.onerror = null; e.target.src = 'https://ui-avatars.com/api/?name=BM&background=dc2626&color=fff&rounded=true'; }} />
+              </div>
+              <h2 className="text-xl md:text-2xl font-black tracking-tight text-white mb-2">Laporan Bro's Mart</h2>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-red-400 bg-red-500/10 px-3 py-1 rounded-lg border border-red-500/20">Buka Dashboard</span>
+            </button>
+          </div>
+
+          <div className="w-full h-px bg-gradient-to-r from-transparent via-slate-700 to-transparent my-12"></div>
+
+          {/* QUICK DATA ENTRY SECTION (GLOBAL) */}
+          <div className="w-full max-w-4xl mx-auto bg-slate-800/60 backdrop-blur-xl border border-slate-700/50 rounded-[2.5rem] p-6 md:p-10 shadow-2xl relative overflow-hidden text-left">
+            <h2 className="text-xl md:text-2xl font-black text-white mb-6 tracking-tight text-center">Borang Kemasukan Data</h2>
+
+            {successMsg && (
+                <div className="mb-6 bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 px-4 py-3 rounded-xl text-center text-sm font-bold flex justify-center items-center gap-2 animate-in fade-in duration-300">
+                    <CheckCircle2 size={18} /> {successMsg}
+                </div>
+            )}
+            {formError && (
+                <div className="mb-6 bg-rose-500/10 border border-rose-500/30 text-rose-300 px-4 py-3 rounded-xl text-center text-sm font-bold flex justify-center items-center gap-2 animate-in fade-in duration-300">
+                    <AlertTriangle size={18} /> {formError}
+                </div>
+            )}
+
+            {/* Form Switcher */}
+            <div className="flex bg-slate-900 p-1.5 rounded-2xl mb-8 border border-slate-700 shadow-inner">
+                <button onClick={() => setGlobalInputTab('sales')} className={`flex-1 py-3 rounded-xl font-black text-xs transition-all uppercase tracking-widest ${globalInputTab === 'sales' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>Jualan</button>
+                <button onClick={() => setGlobalInputTab('expenses')} className={`flex-1 py-3 rounded-xl font-black text-xs transition-all uppercase tracking-widest ${globalInputTab === 'expenses' ? 'bg-rose-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>Belanja</button>
+                <button onClick={() => setGlobalInputTab('transfers')} className={`flex-1 py-3 rounded-xl font-black text-xs transition-all uppercase tracking-widest ${globalInputTab === 'transfers' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>Pindahan</button>
+            </div>
+
+            {/* Target Branch Switcher (Only for Sales & Exp) */}
+            {(globalInputTab === 'sales' || globalInputTab === 'expenses') && (
+              <div className="flex flex-col sm:flex-row justify-center gap-3 mb-8">
+                   <button
+                     onClick={() => {
+                         if(globalInputTab === 'sales') setFormSales({...formSales, target: 'tamtam'});
+                         else setFormExpense({...formExpense, target: 'tamtam'});
+                     }}
+                     className={`px-6 py-3 sm:py-2 rounded-xl sm:rounded-full font-black text-xs transition-all border ${
+                         (globalInputTab === 'sales' ? formSales.target : formExpense.target) === 'tamtam'
+                         ? 'bg-orange-500 border-orange-400 text-white shadow-[0_0_15px_rgba(249,115,22,0.4)]'
+                         : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'
+                     }`}
+                 >
+                     REKOD KE: TAM-TAM
+                 </button>
+                 <button
+                   onClick={() => {
+                       if(globalInputTab === 'sales') setFormSales({...formSales, target: 'ayam'});
+                       else setFormExpense({...formExpense, target: 'ayam'});
+                   }}
+                   className={`px-6 py-3 sm:py-2 rounded-xl sm:rounded-full font-black text-xs transition-all border ${
+                       (globalInputTab === 'sales' ? formSales.target : formExpense.target) === 'ayam'
+                       ? 'bg-red-600 border-red-500 text-white shadow-[0_0_15px_rgba(220,38,38,0.4)]'
+                       : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-500'
+                   }`}
+                 >
+                     REKOD KE: BRO'S MART
+                 </button>
+              </div>
+            )}
+
+            {/* Global Sales Form */}
+            {globalInputTab === 'sales' && (
+                <div className="space-y-5 animate-in slide-in-from-bottom-4 duration-300">
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Tarikh Jualan</label>
+                      <input type="date" value={formSales.date} onChange={(e) => setFormSales({...formSales, date: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 font-black text-white outline-none focus:border-blue-500 shadow-inner text-sm" />
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <InputFieldDark label="Walk-in (Tunai/QR)" prefix="RM" value={formSales.walkin} onChange={(v) => setFormSales({...formSales, walkin: v})} />
+                      <InputFieldDark label="Foodpanda" prefix="RM" value={formSales.panda} onChange={(v) => setFormSales({...formSales, panda: v})} />
+                      <InputFieldDark label="GrabFood" prefix="RM" value={formSales.grab} onChange={(v) => setFormSales({...formSales, grab: v})} />
+                      <InputFieldDark label="Misi" prefix="RM" value={formSales.misi} onChange={(v) => setFormSales({...formSales, misi: v})} />
+                    </div>
+                    <div className="mt-4">
+                       <button onClick={handleSaveSales} className="w-full bg-blue-600 text-white py-4 rounded-xl font-black shadow-xl hover:bg-blue-500 transition-all flex items-center justify-center gap-2 active:scale-95 text-sm uppercase tracking-widest"><Save size={18} /> Simpan Data Jualan</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Global Expenses Form */}
+            {globalInputTab === 'expenses' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 animate-in slide-in-from-bottom-4 duration-300">
+                    <div className="md:col-span-2">
+                        <button onClick={() => setIsScannerModalOpen(true)} className="w-full flex items-center justify-center gap-2 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 px-4 py-3 rounded-xl font-black text-xs transition-all border border-indigo-500/30 shadow-sm active:scale-95 uppercase tracking-widest">
+                            <Camera size={16} /> Imbas Resit / Invois (AI)
+                        </button>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Tarikh Belanja</label>
+                      <input type="date" value={formExpense.date} onChange={(e) => setFormExpense({...formExpense, date: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 font-black text-white outline-none focus:border-rose-500 shadow-inner text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Kategori</label>
+                      <select value={formExpense.category} onChange={(e) => setFormExpense({...formExpense, category: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 px-4 text-sm font-black text-white outline-none focus:border-rose-500 shadow-inner appearance-none">
+                         <option value="Kos Mentah (COGS)">Kos Mentah / Stok (COGS)</option>
+                         <option value="Gaji & Operasi (OPEX)">Gaji, Bil & Operasi (OPEX)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Cara Bayaran (Sumber Dompet)</label>
+                      <select value={formExpense.payment_method} onChange={(e) => setFormExpense({...formExpense, payment_method: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 px-4 text-sm font-black text-white outline-none focus:border-rose-500 shadow-inner appearance-none">
+                         <option value="cash">Tunai Laci (Cash in Hand / TNG)</option>
+                         <option value="bank">Akaun Bank</option>
+                      </select>
+                    </div>
+                    <div>
+                        <InputFieldDark label="Jumlah RM" prefix="RM" value={formExpense.amount} onChange={(v) => setFormExpense({...formExpense, amount: v})} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Rujukan / Catatan</label>
+                      <textarea value={formExpense.description} onChange={(e) => setFormExpense({...formExpense, description: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl p-4 text-sm font-bold text-white shadow-inner h-24 custom-scrollbar focus:border-rose-500 outline-none" placeholder="Cth: NSK Beli Barang Basah"></textarea>
+                    </div>
+                    <div className="md:col-span-2 mt-4">
+                       <button onClick={handleSaveExpense} className="w-full bg-rose-600 text-white py-4 rounded-xl font-black shadow-xl hover:bg-rose-500 transition-all flex items-center justify-center gap-2 active:scale-95 text-sm uppercase tracking-widest"><Save size={18} /> Simpan Perbelanjaan</button>
+                    </div>
+                </div>
+            )}
+
+            {/* Global Transfers Form */}
+            {globalInputTab === 'transfers' && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 animate-in slide-in-from-bottom-4 duration-300">
+                    <div className="md:col-span-2 bg-emerald-500/10 p-4 border border-emerald-500/30 rounded-xl flex items-start gap-3 text-emerald-200 text-xs">
+                        <Info size={20} className="shrink-0" />
+                        <p>Gunakan borang ini untuk merekod pergerakan wang masuk bank (Bank-In), penyelarasan (Settlement), atau suntikan modal (Funder).</p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Tarikh Pindahan</label>
+                      <input type="date" value={formTransfer.date} onChange={(e) => setFormTransfer({...formTransfer, date: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 font-black text-white outline-none focus:border-emerald-500 shadow-inner text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Jenis Pindahan</label>
+                      <select value={formTransfer.type} onChange={(e) => setFormTransfer({...formTransfer, type: e.target.value, payerOption: '', payer: ''})} className="w-full bg-slate-900 border border-slate-700 rounded-xl py-3 px-4 text-sm font-black text-white outline-none focus:border-emerald-500 shadow-inner appearance-none">
+                         <optgroup label="Suntikan Modal / Hutang (Dari Luar/Partner)">
+                           <option value="modal_bros_to_tamtam">Modal: Bro's Mart &rarr; Laci TamTam</option>
+                           <option value="bayar_hutang_bros">Bayar Hutang: Laci TamTam &rarr; Bro's Mart</option>
+                           <option value="modal_luar_cash">Modal Luar &rarr; Laci TamTam</option>
+                           <option value="modal_luar_bank">Modal Luar &rarr; Maybank TamTam</option>
+                           <option value="bayar_hutang_luar">Bayar Hutang: Laci TamTam &rarr; Funder Luar</option>
+                           <option value="modal_luar_cash_bros">Modal Luar &rarr; Laci Bro's Mart</option>
+                           <option value="modal_luar_bank_bros">Modal Luar &rarr; Maybank Raudhah</option>
+                           <option value="bayar_hutang_luar_bros">Bayar Hutang: Laci Bro's &rarr; Funder Luar</option>
+                         </optgroup>
+                         <optgroup label="Bank-In (Tunai Laci -> Bank)">
+                           <option value="bankin_tamtam">Bank-In Tunai TamTam &rarr; Maybank TamTam</option>
+                           <option value="bankin_bros">Bank-In Tunai Bro's &rarr; Maybank Raudhah</option>
+                         </optgroup>
+                         <optgroup label="Pengeluaran (Drawings)">
+                           <option value="draw_tamtam_cash">Ambil Tunai Laci TamTam</option>
+                           <option value="draw_tamtam_bank">Keluarkan Duit Maybank TamTam</option>
+                           <option value="draw_bros_cash">Ambil Tunai Laci Bro's</option>
+                           <option value="draw_raudhah">Keluarkan Duit Maybank Raudhah</option>
+                         </optgroup>
+                      </select>
+                    </div>
+
+                    {/* Show Funder Input if 'Modal Luar' is selected */}
+                    {(formTransfer.type.startsWith('modal_luar') || formTransfer.type.startsWith('bayar_hutang_luar')) && (
+                      <div className="md:col-span-2 grid grid-cols-1 md:grid-cols-2 gap-4">
+                         <div>
+                            <label className="block text-[10px] font-black text-slate-300 uppercase tracking-widest mb-2 drop-shadow">Pilih Funder Luar</label>
+                            <select 
+                                value={formTransfer.payerOption || ''} 
+                                onChange={(e) => setFormTransfer({...formTransfer, payerOption: e.target.value, payer: e.target.value === 'NEW' ? '' : e.target.value})}
+                                className="w-full bg-slate-900 border border-slate-600 rounded-xl py-3 px-4 text-sm font-black text-white outline-none focus:border-emerald-500 shadow-inner appearance-none transition-colors"
+                            >
+                                <option value="" disabled>-- Sila Pilih Funder --</option>
+                                {uniqueFunders.map(f => <option key={f} value={f}>{f}</option>)}
+                                <option value="NEW">+ Funder Baru</option>
+                            </select>
+                         </div>
+                         {formTransfer.payerOption === 'NEW' && (
+                             <div>
+                                <InputFieldDark label="Nama Funder Baru (Wajib)" value={formTransfer.payer} onChange={(v) => setFormTransfer({...formTransfer, payer: v})} placeholder="Cth: HGV / Ali" />
+                             </div>
+                         )}
+                      </div>
+                    )}
+
+                    <div className="md:col-span-2">
+                        <InputFieldDark label="Jumlah RM" prefix="RM" value={formTransfer.amount} onChange={(v) => setFormTransfer({...formTransfer, amount: v})} />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Rujukan / Catatan</label>
+                      <textarea value={formTransfer.description} onChange={(e) => setFormTransfer({...formTransfer, description: e.target.value})} className="w-full bg-slate-900 border border-slate-700 rounded-xl p-4 text-sm font-bold text-white shadow-inner h-20 custom-scrollbar focus:border-emerald-500 outline-none" placeholder="Cth: Bank-in duit jualan hujung minggu"></textarea>
+                    </div>
+                    <div className="md:col-span-2 mt-4">
+                       <button onClick={handleSaveTransfer} className="w-full bg-emerald-600 text-white py-4 rounded-xl font-black shadow-xl hover:bg-emerald-500 transition-all flex items-center justify-center gap-2 active:scale-95 text-sm uppercase tracking-widest"><CheckCircle2 size={18} /> Sahkan Pindahan</button>
+                    </div>
+                </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col md:flex-row h-screen bg-slate-50 font-sans text-slate-900 overflow-hidden relative">
+
+      <input type="file" ref={fileInputRef} className="hidden" accept=".csv" onChange={handleFileChange} />
+
+      {/* Modal Paparan Error Firebase Config */}
+      {dbError && (
+        <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-lg shadow-2xl p-6 md:p-8 text-center animate-in fade-in zoom-in duration-200">
+            <AlertTriangle size={64} className="text-rose-500 mx-auto mb-4" />
+            <h3 className="text-xl md:text-2xl font-black text-slate-800 mb-2 tracking-tight">Maklumat Pangkalan Data</h3>
+            <p className="text-sm text-slate-600 mb-6 font-medium leading-relaxed">{dbError}</p>
+            <button onClick={() => setDbError(null)} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black uppercase tracking-widest shadow-lg hover:bg-black transition-colors">Tutup Notis Ini</button>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile Header */}
+      <div className="md:hidden flex justify-between items-center bg-slate-900 text-white p-4 z-30 shrink-0 shadow-md">
+        <div className="flex items-center gap-3">
+          {selectedBranch === 'tamtam' ? (
+             <img src="./tamtam-logo.jpg" alt="TamTam Logo" className="w-10 h-10 rounded-lg object-contain shadow-lg bg-black p-0.5 border border-slate-700" onError={(e) => { e.target.onerror = null; e.target.src = 'https://ui-avatars.com/api/?name=T&background=000&color=fff&rounded=true'; }} />
+          ) : (
+             <img src="./brosmart-logo.jpg" alt="Bro's Mart Logo" className="w-10 h-10 rounded-lg object-cover shadow-lg border border-red-700/50" onError={(e) => { e.target.onerror = null; e.target.src = 'https://ui-avatars.com/api/?name=BM&background=dc2626&color=fff&rounded=true'; }} />
+          )}
+          <div>
+            <h1 className="text-lg font-black leading-none tracking-tight font-sans uppercase">{selectedBranch === 'tamtam' ? 'TamTam Burger' : "Bro's Mart"}</h1>
+            <p className="text-[9px] text-slate-400 uppercase tracking-widest mt-0.5 font-bold">TamTam ERP System</p>
+          </div>
+        </div>
+        <button onClick={() => setIsMobileMenuOpen(true)} className="p-2 -mr-2 text-slate-300 hover:text-white">
+          <Menu size={24} />
+        </button>
+      </div>
+
+      {/* Confirmation Modals */}
+      {saleToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl p-6 md:p-8 text-center animate-in fade-in zoom-in duration-200">
+            <AlertTriangle size={48} className="text-rose-500 mx-auto mb-4" />
+            <h3 className="text-lg md:text-xl font-black text-slate-800 mb-2 tracking-tight">Padam Rekod Jualan?</h3>
+            <p className="text-sm text-slate-500 mb-8 font-medium">Tindakan ini tidak boleh dipulihkan.</p>
+            <div className="flex gap-3">
+              <button onClick={() => setSaleToDelete(null)} className="flex-1 bg-slate-100 text-slate-600 py-3 rounded-xl font-bold hover:bg-slate-200 transition-colors">Batal</button>
+              <button onClick={confirmDeleteSale} className="flex-1 bg-rose-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-rose-200 hover:bg-rose-700 transition-colors">Ya, Padam</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {expenseToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl p-6 md:p-8 text-center animate-in fade-in zoom-in duration-200">
+            <AlertTriangle size={48} className="text-rose-500 mx-auto mb-4" />
+            <h3 className="text-lg md:text-xl font-black text-slate-800 mb-2 tracking-tight">Padam Rekod Belanja?</h3>
+            <p className="text-sm text-slate-500 mb-8 font-medium">Tindakan ini tidak boleh dipulihkan.</p>
+            <div className="flex gap-3">
+              <button onClick={() => setExpenseToDelete(null)} className="flex-1 bg-slate-100 text-slate-600 py-3 rounded-xl font-bold hover:bg-slate-200 transition-colors">Batal</button>
+              <button onClick={confirmDeleteExpense} className="flex-1 bg-rose-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-rose-200 hover:bg-rose-700 transition-colors">Ya, Padam</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {transferToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl p-6 md:p-8 text-center animate-in fade-in zoom-in duration-200">
+            <AlertTriangle size={48} className="text-rose-500 mx-auto mb-4" />
+            <h3 className="text-lg md:text-xl font-black text-slate-800 mb-2 tracking-tight">Padam Rekod Pindahan?</h3>
+            <p className="text-sm text-slate-500 mb-8 font-medium">Ini akan menjejaskan baki dompet aliran tunai.</p>
+            <div className="flex gap-3">
+              <button onClick={() => setTransferToDelete(null)} className="flex-1 bg-slate-100 text-slate-600 py-3 rounded-xl font-bold hover:bg-slate-200 transition-colors">Batal</button>
+              <button onClick={confirmDeleteTransfer} className="flex-1 bg-rose-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-rose-200 hover:bg-rose-700 transition-colors">Ya, Padam</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {inventoryToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl p-6 md:p-8 text-center animate-in fade-in zoom-in duration-200">
+            <AlertTriangle size={48} className="text-rose-500 mx-auto mb-4" />
+            <h3 className="text-lg md:text-xl font-black text-slate-800 mb-2 tracking-tight">Padam Item Stok?</h3>
+            <div className="flex gap-3 mt-8">
+              <button onClick={() => setInventoryToDelete(null)} className="flex-1 bg-slate-100 text-slate-600 py-3 rounded-xl font-bold hover:bg-slate-200 transition-colors">Batal</button>
+              <button onClick={confirmDeleteInventory} className="flex-1 bg-rose-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-rose-200 hover:bg-rose-700 transition-colors">Ya, Padam</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mobile Sidebar Overlay */}
+      {isMobileMenuOpen && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-40 md:hidden" onClick={() => setIsMobileMenuOpen(false)}></div>
+      )}
+
+      {/* Sidebar Responsive */}
+      <div className={`fixed inset-y-0 left-0 z-50 w-72 bg-slate-900 text-white flex flex-col p-4 overflow-y-auto transition-transform duration-300 ease-in-out md:static md:translate-x-0 md:shrink-0 border-r border-slate-800 ${isMobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex justify-between items-start mb-8 px-2">
+          <div className="flex items-center gap-4">
+            {selectedBranch === 'tamtam' ? (
+              <img src="./tamtam-logo.jpg" alt="TamTam" className="w-14 h-14 rounded-xl object-contain shadow-lg bg-black p-1 border border-slate-700" onError={(e) => { e.target.onerror = null; e.target.src = 'https://ui-avatars.com/api/?name=T&background=000&color=fff&rounded=true'; }} />
+            ) : (
+              <img src="./brosmart-logo.jpg" alt="Bro's Mart" className="w-14 h-14 rounded-xl object-cover shadow-lg border border-red-700/50" onError={(e) => { e.target.onerror = null; e.target.src = 'https://ui-avatars.com/api/?name=BM&background=dc2626&color=fff&rounded=true'; }} />
+            )}
+            <div>
+              <h1 className="text-xl font-black leading-none tracking-tight text-white font-sans uppercase tracking-tighter">
+                {selectedBranch === 'tamtam' ? 'TamTam Burger' : "Bro's Mart"}
+              </h1>
+              <p className="text-[8px] text-slate-400 font-bold uppercase tracking-widest mt-1">Laporan Perniagaan</p>
+            </div>
+          </div>
+          <button onClick={() => setIsMobileMenuOpen(false)} className="md:hidden text-slate-400 hover:text-white p-1">
+            <XCircle size={24} />
+          </button>
+        </div>
+        
+        {/* Butang Kembali Ke Global (Home) */}
+        <button onClick={handleLogoutBranch} className="mb-8 w-full flex items-center justify-center gap-2 py-3 bg-slate-800 text-slate-300 rounded-xl hover:bg-slate-700 hover:text-white transition-all text-xs font-black uppercase tracking-widest shadow-inner border border-slate-700/50">
+           <ArrowLeft size={16} /> Utama & Rekod
+        </button>
+
+        <nav className="flex-1 space-y-1">
+          <SidebarItem icon={<LayoutDashboard size={20} />} label="Ringkasan" active={activeTab === 'overview'} onClick={() => switchTab('overview')} />
+          <SidebarItem icon={<Wallet size={20} />} label="Senarai Jualan" active={activeTab === 'sales'} onClick={() => switchTab('sales')} />
+          <SidebarItem icon={<Receipt size={20} />} label="Senarai Belanja" active={activeTab === 'expenses'} onClick={() => switchTab('expenses')} />
+          <SidebarItem icon={<Package size={20} />} label="Stok & Wastage" active={activeTab === 'inventory'} onClick={() => switchTab('inventory')} />
+          <SidebarItem icon={<AlertCircle size={20} />} label="Aliran Tunai (Cashflow)" active={activeTab === 'cashflow'} onClick={() => switchTab('cashflow')} />
+          <SidebarItem icon={<Upload size={20} />} label="Import Loyverse" active={activeTab === 'import'} onClick={() => switchTab('import')} />
+        </nav>
+      </div>
+
+      {/* Content Area */}
+      <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar relative">
+        <header className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 md:mb-8 gap-4">
+          <div>
+            <h2 className="text-xl md:text-2xl font-black uppercase tracking-tight text-slate-800">
+               {activeTab === 'sales' ? 'REKOD JUALAN' : activeTab === 'expenses' ? 'REKOD BELANJA' : activeTab.replace('-', ' ')}
+            </h2>
+            <p className="text-slate-400 text-xs md:text-[13px] font-bold italic font-sans">
+              "Laporan {selectedBranch === 'tamtam' ? 'Burger' : "Bro's Mart"} &bull; TamTam ERP"
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 md:gap-3 w-full sm:w-auto">
+            <button className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-white border border-slate-200 px-3 py-2 md:px-5 md:py-2.5 rounded-xl text-[10px] md:text-sm font-black shadow-sm hover:bg-slate-50 transition-all">
+              <FileText size={16} /> Export
+            </button>
+          </div>
+        </header>
+
+        {/* OVERVIEW TAB */}
+        {activeTab === 'overview' && (
+          <div className="space-y-4 md:space-y-6 animate-in fade-in duration-300">
+            <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 md:gap-6`}>
+              <StatCard title="Earning (Nett)" value={`RM ${stats.totalEarning.toFixed(2)}`} color="blue" />
+              <StatCard title="Untung Bersih" value={`RM ${stats.netProfit.toFixed(2)}`} color="emerald" icon={<DollarSign size={20} />} />
+              {selectedBranch === 'tamtam' ? (
+                  <>
+                    <StatCard title="Hutang Ke Bro's Mart" value={`RM ${hutangTamTam.toFixed(2)}`} color="orange" icon={<AlertCircle size={20} />} />
+                    <StatCard title="Hutang Funder Luar" value={`RM ${hutangLuar.toFixed(2)}`} color="slate" icon={<AlertCircle size={20} />} />
+                  </>
+              ) : (
+                  <>
+                    <StatCard title="Piutang (Hutang TamTam)" value={`RM ${hutangTamTam.toFixed(2)}`} color="emerald" icon={<AlertCircle size={20} />} />
+                    <StatCard title="Hutang Funder Luar" value={`RM ${hutangLuar.toFixed(2)}`} color="slate" icon={<AlertCircle size={20} />} />
+                  </>
+              )}
+            </div>
+            
+            <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 md:gap-6">
+               <div className="xl:col-span-2 bg-white p-4 md:p-8 rounded-2xl md:rounded-[2rem] shadow-sm border border-slate-200 h-64 md:h-80 flex flex-col">
+                 <h3 className="font-black text-slate-800 mb-4 flex items-center gap-2 uppercase text-xs tracking-widest">
+                    <TrendingUp size={16} className="text-blue-600" /> Jualan 7 Hari Terakhir
+                 </h3>
+                 <div className="flex-1 flex items-end justify-between gap-2 md:gap-4 pt-4 border-b border-slate-100 pb-2 h-full">
+                   {(() => {
+                     const last7Days = (salesData || []).slice(-7);
+                     if (last7Days.length === 0) return <div className="w-full h-full flex items-center justify-center text-slate-300 text-xs font-bold italic">Tiada rekod data jualan</div>;
+                     
+                     const maxEarning = Math.max(...last7Days.map(d => Number(d.walkin||0) + Number(d.panda||0) + Number(d.grab||0) + Number(d.misi||0)), 100);
+                     
+                     return last7Days.map((day, idx) => {
+                       const walkinTotal = Number(day.walkin || 0);
+                       const panda = Number(day.panda || 0);
+                       const grab = Number(day.grab || 0);
+                       const misi = Number(day.misi || 0);
+                       const total = walkinTotal + panda + grab + misi;
+                       
+                       const hTotal = (total / maxEarning) * 100;
+                       const hWalkin = total > 0 ? (walkinTotal / total) * 100 : 0;
+                       const hPanda = total > 0 ? (panda / total) * 100 : 0;
+                       const hGrab = total > 0 ? (grab / total) * 100 : 0;
+                       const hMisi = total > 0 ? (misi / total) * 100 : 0;
+
+                       return (
+                          <div key={day.id || idx} className="flex flex-col items-center justify-end h-full w-full gap-2 group relative">
+                             <div className="absolute -top-10 bg-slate-800 text-white text-[10px] p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-10 shadow-xl">RM {total.toFixed(2)}</div>
+                             <div className="w-full max-w-[40px] bg-slate-50 rounded-t-md relative flex flex-col justify-end overflow-hidden border-b-2 border-transparent group-hover:border-blue-500 transition-all shadow-inner" style={{ height: `${Math.max(hTotal, 1)}%` }}>
+                                {walkinTotal > 0 && <div className="w-full bg-blue-500 transition-all" style={{ height: `${hWalkin}%` }}></div>}
+                                {panda > 0 && <div className="w-full bg-pink-500 transition-all" style={{ height: `${hPanda}%` }}></div>}
+                                {grab > 0 && <div className="w-full bg-green-500 transition-all" style={{ height: `${hGrab}%` }}></div>}
+                                {misi > 0 && <div className="w-full bg-orange-500 transition-all" style={{ height: `${hMisi}%` }}></div>}
+                             </div>
+                             <span className="text-[8px] md:text-[10px] text-slate-400 font-bold truncate">{day.date ? day.date.substring(5) : ''}</span>
+                          </div>
+                       );
+                     });
+                   })()}
+                 </div>
+                 <div className="flex flex-wrap justify-center gap-3 md:gap-5 mt-4 text-[9px] md:text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 bg-blue-500 rounded-full"></div>Tunai & QR</div>
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 bg-pink-500 rounded-full"></div>Panda</div>
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 bg-green-500 rounded-full"></div>Grab</div>
+                    <div className="flex items-center gap-1.5"><div className="w-2.5 h-2.5 bg-orange-500 rounded-full"></div>Misi</div>
+                 </div>
+               </div>
+
+               <div className="bg-slate-900 p-6 md:p-8 rounded-2xl md:rounded-[2rem] text-white shadow-xl relative overflow-hidden flex flex-col border border-slate-800">
+                 <div className="absolute bottom-0 right-0 p-8 opacity-5"><DollarSign size={100} className="md:w-[120px] md:h-[120px]"/></div>
+                 <h3 className="text-lg font-black mb-2 md:mb-6 tracking-tight uppercase text-blue-400">Prestasi Keseluruhan</h3>
+                 <div className="space-y-4 flex-1 mt-4">
+                   <div className="flex justify-between items-end border-b border-white/10 pb-4">
+                      <div>
+                         <p className="text-[10px] text-slate-400 uppercase tracking-widest font-black mb-1">Total Pendapatan</p>
+                         <p className="text-xl font-black text-white">RM {stats.totalEarning.toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
+                      </div>
+                   </div>
+                   <div className="flex justify-between items-end border-b border-white/10 pb-4">
+                      <div>
+                         <p className="text-[10px] text-rose-400 uppercase tracking-widest font-black mb-1">Total Perbelanjaan</p>
+                         <p className="text-xl font-black text-rose-100">RM {stats.totalExpense.toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
+                      </div>
+                   </div>
+                   <div className="pt-2">
+                      <p className="text-[10px] text-emerald-400 uppercase tracking-widest font-black mb-1">Untung Bersih (P&L)</p>
+                      <p className="text-3xl font-black text-emerald-400 tracking-tighter">RM {stats.netProfit.toLocaleString(undefined, {minimumFractionDigits: 2})}</p>
+                   </div>
+                 </div>
+               </div>
+            </div>
+
+            <div className="bg-white rounded-2xl md:rounded-[2rem] shadow-sm border border-slate-200 overflow-hidden">
+              <div className="p-5 md:p-8 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="font-black text-sm md:text-xl text-slate-800 tracking-tight uppercase flex items-center gap-2">
+                  <LayoutDashboard size={20} className="text-blue-600" /> Prestasi & P&L Bulanan
+                </h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left min-w-[700px]">
+                  <thead className="bg-slate-50 text-slate-400 text-[9px] md:text-[10px] uppercase tracking-[0.2em] font-black border-b border-slate-100">
+                    <tr>
+                      <th className="px-4 md:px-8 py-4 md:py-5">Bulan</th>
+                      <th className="px-4 md:px-8 py-4 md:py-5 text-right">Walk-in</th>
+                      <th className="px-4 md:px-8 py-4 md:py-5 text-right">Apps</th>
+                      <th className="px-4 md:px-8 py-4 md:py-5 text-right text-blue-600 bg-blue-50/30">Total Jualan</th>
+                      <th className="px-4 md:px-8 py-4 md:py-5 text-right text-rose-500 bg-rose-50/30">Perbelanjaan</th>
+                      <th className="px-4 md:px-8 py-4 md:py-5 text-right text-emerald-600 bg-emerald-50/30">Untung Bersih</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-bold text-xs md:text-sm">
+                    {(monthlyStats || []).map(m => {
+                      const dateObj = new Date(m.month + '-01');
+                      const monthName = dateObj.toLocaleDateString('ms-MY', { month: 'short', year: 'numeric' });
+                      return (
+                        <tr key={m.month} className="hover:bg-slate-50/50 transition-all">
+                          <td className="px-4 md:px-8 py-4 md:py-6 font-black text-slate-800 uppercase tracking-widest">{monthName}</td>
+                          <td className="px-4 md:px-8 py-4 md:py-6 text-right text-slate-500 whitespace-nowrap">RM {m.walkin.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          <td className="px-4 md:px-8 py-4 md:py-6 text-right text-slate-500 whitespace-nowrap">RM {m.apps.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          <td className="px-4 md:px-8 py-4 md:py-6 text-right font-black text-blue-600 bg-blue-50/30 whitespace-nowrap">RM {m.earning.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          <td className="px-4 md:px-8 py-4 md:py-6 text-right font-black text-rose-500 bg-rose-50/30 whitespace-nowrap">RM {m.expense.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          <td className="px-4 md:px-8 py-4 md:py-6 text-right font-black text-emerald-600 text-lg md:text-xl tracking-tighter bg-emerald-50/30 whitespace-nowrap">RM {m.profit.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                        </tr>
+                      );
+                    })}
+                    {(!monthlyStats || monthlyStats.length === 0) && <tr><td colSpan="6" className="text-center py-8 text-slate-400 italic text-[10px] uppercase tracking-widest font-black">Tiada rekod</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- FULL SALES TAB --- */}
+        {activeTab === 'sales' && (
+          <div className="space-y-6 md:space-y-8 animate-in slide-in-from-bottom-4 duration-300">
+            <div className="bg-white rounded-2xl md:rounded-[2.5rem] shadow-sm border border-slate-200 overflow-hidden flex flex-col">
+              <div className="p-5 md:p-8 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+                <h3 className="font-black text-sm md:text-xl text-slate-800 tracking-tight uppercase">Sejarah Keseluruhan Jualan</h3>
+              </div>
+              <div className="overflow-x-auto flex-1">
+                <table className="w-full text-left relative min-w-[800px]">
+                  <thead className="bg-white text-slate-400 text-[9px] md:text-[10px] uppercase tracking-[0.2em] font-black border-b border-slate-100 sticky top-0 z-10 shadow-sm">
+                    <tr>
+                      <th className="px-4 md:px-6 py-4 md:py-5">Tarikh</th>
+                      <th className="px-4 md:px-6 py-4 md:py-5">Sumber</th>
+                      <th className="px-4 md:px-6 py-4 md:py-5 text-right">Walk-in</th>
+                      <th className="px-4 md:px-6 py-4 md:py-5 text-right">Apps</th>
+                      <th className="px-4 md:px-6 py-4 md:py-5 text-right text-blue-600">Total Jualan</th>
+                      <th className="px-4 md:px-6 py-4 md:py-5 text-center">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-50 font-bold text-[11px] md:text-xs">
+                    {([...salesData] || []).reverse().map(day => {
+                      const walkin = Number(day.walkin || 0);
+                      const apps = Number(day.panda || 0) + Number(day.grab || 0) + Number(day.misi || 0);
+                      const total = walkin + apps;
+                      return (
+                        <tr key={day.id} className="hover:bg-slate-50 transition-all group">
+                          <td className="px-4 md:px-6 py-4 md:py-5 font-black text-slate-800 whitespace-nowrap">{new Date(day.date).toLocaleDateString('ms-MY', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                          <td className="px-4 md:px-6 py-4 md:py-5">
+                            {day.source ? <span className="bg-blue-50 text-blue-600 px-2 py-1 rounded border border-blue-100 text-[9px] uppercase tracking-widest">{day.source.substring(0,15)}...</span> : <span className="bg-slate-100 text-slate-500 px-2 py-1 rounded border border-slate-200 text-[9px] uppercase tracking-widest">Manual</span>}
+                          </td>
+                          <td className="px-4 md:px-6 py-4 md:py-5 text-right text-slate-500 whitespace-nowrap tracking-tighter">RM {walkin.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          <td className="px-4 md:px-6 py-4 md:py-5 text-right text-slate-500 whitespace-nowrap tracking-tighter">RM {apps.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          <td className="px-4 md:px-6 py-4 md:py-5 text-right font-black text-blue-600 text-sm whitespace-nowrap tracking-tighter">RM {total.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                          
+                          <td className="px-4 md:px-6 py-4 md:py-5 text-center">
+                            <button onClick={() => setSaleToDelete(day.id)} className="text-slate-400 hover:text-rose-500 transition-colors p-2 active:scale-90 bg-white border border-slate-200 rounded-md shadow-sm">
+                              <Trash2 size={16}/>
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                    {(!salesData || salesData.length === 0) && <tr><td colSpan={6} className="text-center py-10 text-slate-300 italic uppercase tracking-widest text-[10px]">Tiada rekod jualan</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- FULL EXPENSES TAB --- */}
+        {activeTab === 'expenses' && (
+          <div className="space-y-6 md:space-y-8 animate-in slide-in-from-bottom-4 duration-300">
+            <div className="bg-white rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm flex flex-col h-fit">
+              <div className="p-6 md:p-8 bg-slate-50/50 border-b flex justify-between items-center"><h3 className="font-black text-xl uppercase tracking-tight">Semua Log Perbelanjaan</h3></div>
+              <div className="overflow-x-auto flex-1">
+                <table className="w-full text-left min-w-[700px]"><thead className="bg-white text-slate-400 text-[9px] uppercase tracking-[0.2em] font-black sticky top-0 border-b border-slate-100"><tr><th className="px-6 py-4 md:py-5">Tarikh</th><th className="px-6 py-4 md:py-5">Kategori</th><th className="px-6 py-4 md:py-5">Catatan</th><th className="px-6 py-4 md:py-5 text-right">Jumlah RM</th><th className="px-6 py-4 md:py-5 text-center">Aksi</th></tr></thead>
+                  <tbody className="divide-y divide-slate-50 font-bold text-[11px] md:text-xs">{([...expensesData] || []).reverse().map(exp => {
+                    const isCogs = exp.category?.includes('COGS');
+                    return (
+                      <tr key={exp.id} className="hover:bg-slate-50 transition-all">
+                        <td className="px-6 py-4 md:py-5 font-black text-slate-800 whitespace-nowrap">{new Date(exp.date).toLocaleDateString('ms-MY', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                        <td className="px-6 py-4 md:py-5">
+                           <div className="flex flex-col gap-1">
+                             <span className={`w-fit px-2 py-1 rounded border text-[9px] uppercase tracking-widest ${isCogs ? 'bg-orange-50 text-orange-600 border-orange-100' : 'bg-purple-50 text-purple-600 border-purple-100'}`}>
+                                {isCogs ? 'Kos Mentah' : 'Operasi'}
+                             </span>
+                             <span className={`w-fit px-2 py-0.5 rounded text-[8px] uppercase tracking-widest border ${exp.payment_method === 'bank' ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                                Byr: {exp.payment_method === 'bank' ? 'Bank' : 'Tunai Laci'}
+                             </span>
+                           </div>
+                        </td>
+                        <td className="px-6 py-4 md:py-5 text-slate-600 max-w-[300px] break-words leading-relaxed">{exp.description || '-'}</td>
+                        <td className="px-6 py-4 md:py-5 text-right text-rose-500 font-black whitespace-nowrap text-sm">RM {Number(exp.amount).toFixed(2)}</td>
+                        <td className="px-6 py-4 md:py-5 text-center"><button onClick={() => setExpenseToDelete(exp.id)} className="text-slate-400 hover:text-rose-500 transition-colors p-2 active:scale-90 bg-white border border-slate-200 rounded-md shadow-sm"><Trash2 size={16} /></button></td>
+                      </tr>
+                  )})}
+                  {(!expensesData || expensesData.length === 0) && <tr><td colSpan="5" className="text-center py-10 text-slate-300 italic uppercase tracking-widest text-[10px]">Tiada rekod perbelanjaan</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- FULL INVENTORY TAB --- */}
+        {activeTab === 'inventory' && (
+          <div className="space-y-6 md:space-y-8 animate-in slide-in-from-bottom-4 duration-300">
+            <div className="bg-white p-5 md:p-8 rounded-2xl md:rounded-[2.5rem] shadow-sm border border-slate-200">
+              <h3 className="text-xl md:text-2xl font-black flex items-center gap-3 md:gap-4 text-slate-800 tracking-tight mb-6"><Package size={24} className="text-blue-600 md:w-7 md:h-7" /> Tambah Item Stok Baru</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 md:gap-6">
+                <InputField label="Nama Item" prefix="" value={newInventoryItem.name} onChange={(v) => setNewInventoryItem({...newInventoryItem, name: v})} placeholder="Cth: Mayonis" type="text" />
+                <InputField label="Kuantiti Awal" prefix="" type="number" value={newInventoryItem.stock} onChange={(v) => setNewInventoryItem({...newInventoryItem, stock: v})} placeholder="Cth: 10" />
+                <InputField label="Unit Ukuran" prefix="" value={newInventoryItem.unit} onChange={(v) => setNewInventoryItem({...newInventoryItem, unit: v})} placeholder="Cth: botol / pek" type="text" />
+              </div>
+              <button onClick={handleAddInventoryItem} className="mt-6 w-full sm:w-auto bg-slate-900 text-white px-8 py-3 md:py-4 rounded-xl md:rounded-2xl font-black shadow-xl hover:bg-black transition-all flex items-center justify-center gap-2 active:scale-95 text-sm md:text-base"><Plus size={18} /> Simpan Kategori Stok</button>
+            </div>
+
+            {(!inventory || inventory.length === 0) ? (
+               <div className="bg-white p-10 rounded-[2.5rem] border-2 border-dashed border-slate-200 flex flex-col items-center justify-center text-center"><Package size={48} className="text-slate-300 mb-4" /><h4 className="text-lg font-black text-slate-600 uppercase tracking-widest">Tiada Item Stok</h4></div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 md:gap-6">
+                {(inventory || []).map(item => (
+                  <div key={item.id} className={`p-5 md:p-8 rounded-2xl md:rounded-[2.5rem] border-2 transition-all relative group ${item.stock < 10 ? 'bg-rose-50 border-rose-200 shadow-lg' : 'bg-white border-slate-100 shadow-sm'}`}>
+                    <button onClick={() => setInventoryToDelete(item.id)} className="absolute top-4 right-4 md:top-6 md:right-6 p-2 bg-white border border-slate-100 rounded-lg text-slate-300 hover:text-rose-500 shadow-sm opacity-0 group-hover:opacity-100 transition-all active:scale-90 z-10"><Trash2 size={14}/></button>
+                    <div className="flex justify-between items-start mb-4 md:mb-6 pr-8">
+                      <span className={`text-[10px] font-black uppercase tracking-widest ${item.stock < 10 ? 'text-rose-600' : 'text-slate-400'}`}>{item.item}</span>
+                      {item.stock < 10 && <AlertTriangle size={18} className="text-rose-500 animate-pulse" />}
+                    </div>
+                    <div className="text-3xl md:text-4xl font-black text-slate-900 mb-6 md:mb-8 tracking-tighter">{item.stock} <span className="text-[10px] md:text-xs font-bold text-slate-400 uppercase tracking-tighter">{item.unit}</span></div>
+                    <div className="space-y-3 md:space-y-4">
+                      <input type="number" placeholder="Jumlah" value={manualStockInputs[item.id] || ''} onChange={(e) => setManualStockInputs({...manualStockInputs, [item.id]: e.target.value})} className="w-full bg-slate-50 border-2 border-slate-100 rounded-xl px-4 py-2 font-black text-xs md:text-sm text-slate-800 outline-none focus:border-blue-500 shadow-inner transition-all" />
+                      <div className="flex gap-2">
+                        <button onClick={() => handleUpdateStockManual(item.id, item.stock, 'restock')} className="flex-1 bg-slate-900 text-white py-2.5 md:py-3 rounded-lg md:rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-1 hover:bg-black active:scale-95 transition-all shadow-md"><Plus size={12} /> Tambah</button>
+                        <button onClick={() => handleUpdateStockManual(item.id, item.stock, 'waste')} className={`flex-1 py-2.5 md:py-3 rounded-lg md:rounded-xl text-[9px] md:text-[10px] font-black uppercase tracking-widest border-2 flex items-center justify-center gap-1 active:scale-95 transition-all shadow-md ${item.stock < 10 ? 'bg-rose-600 text-white border-rose-600' : 'bg-white text-slate-600 border-slate-100 hover:bg-slate-50'}`}><Minus size={12} /> Waste</button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="bg-white p-5 md:p-10 rounded-2xl md:rounded-[2.5rem] shadow-sm border border-slate-200">
+               <h3 className="font-black text-slate-800 mb-6 md:mb-8 uppercase tracking-widest text-[10px] md:text-[11px] flex items-center gap-2"><History size={16} className="text-blue-600" /> Log Pergerakan Stok</h3>
+               <div className="space-y-3 md:space-y-4">
+                 {(stockLogs || []).map(log => (
+                   <div key={log.id} className="flex items-center justify-between p-3 md:p-5 bg-slate-50 border border-slate-100 rounded-xl md:rounded-2xl">
+                     <div className="flex items-center gap-3 md:gap-5">
+                        <div className={`w-8 h-8 md:w-12 md:h-12 rounded-lg md:rounded-xl flex items-center justify-center font-black text-sm md:text-base ${log.type === 'restock' ? 'bg-emerald-100 text-emerald-700 shadow-inner' : 'bg-rose-100 text-rose-700 shadow-inner'}`}>{log.type === 'restock' ? '+' : '-'}</div>
+                        <div>
+                          <p className="font-black text-slate-800 tracking-tight text-xs md:text-sm">{log.type === 'restock' ? 'Restock' : 'Wastage'}: {log.itemName}</p>
+                          <p className="text-[8px] md:text-[10px] text-slate-400 font-bold uppercase tracking-widest">{log.timestamp?.seconds ? new Date(log.timestamp.seconds * 1000).toLocaleString('ms-MY', { day: 'numeric', month: 'short', hour: '2-digit', minute:'2-digit' }) : 'Memproses...'}</p>
+                        </div>
+                     </div>
+                     <span className={`font-black text-lg md:text-2xl tracking-tighter ${log.type === 'restock' ? 'text-emerald-600' : 'text-rose-600'}`}>{log.change > 0 ? `+${log.change}` : log.change}</span>
+                   </div>
+                 ))}
+                 {(!stockLogs || stockLogs.length === 0) && <p className="text-center text-[10px] text-slate-400 uppercase font-black italic">Tiada log stok</p>}
+               </div>
+            </div>
+          </div>
+        )}
+
+        {/* --- TAB BARU: ALIRAN TUNAI (CASHFLOW & TRANSFERS) --- */}
+        {activeTab === 'cashflow' && (
+          <div className="space-y-6 md:space-y-8 animate-in slide-in-from-bottom-4 duration-300">
+             <div className="grid grid-cols-2 gap-4 md:gap-6 w-full">
+                {selectedBranch === 'tamtam' ? (
+                  <>
+                    <div className="bg-white p-6 md:p-8 rounded-[2rem] text-left shadow-sm border border-slate-200">
+                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><Wallet size={16} className="text-blue-500"/> Cash / TNG (TamTam)</p>
+                       <p className="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter">RM {wallets.tamtamCash.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+                    </div>
+                    <div className="bg-white p-6 md:p-8 rounded-[2rem] text-left shadow-sm border border-slate-200 relative overflow-hidden">
+                       <div className="absolute top-0 right-0 p-4 opacity-10"><Lock size={64} className="text-orange-500" /></div>
+                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><Store size={16} className="text-orange-500"/> Maybank (TamTam)</p>
+                       <p className="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter relative z-10">RM {wallets.tamtamBank.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="bg-white p-6 md:p-8 rounded-[2rem] text-left shadow-sm border border-slate-200">
+                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><Wallet size={16} className="text-red-500"/> Cash / TNG (Bro's Mart)</p>
+                       <p className="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter">RM {wallets.brosCash.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+                    </div>
+                    <div className="bg-white p-6 md:p-8 rounded-[2rem] text-left shadow-sm border border-slate-200 relative overflow-hidden">
+                       <div className="absolute top-0 right-0 p-4 opacity-10"><Lock size={64} className="text-emerald-500" /></div>
+                       <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-2"><Store size={16} className="text-emerald-500"/> Maybank Raudhah</p>
+                       <p className="text-3xl md:text-4xl font-black text-slate-900 tracking-tighter relative z-10">RM {wallets.raudhahBank.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+                    </div>
+                  </>
+                )}
+             </div>
+
+             {/* Breakdown Hutang Luar */}
+             {hutangLuarBreakdown.length > 0 && (
+                 <div className="mt-8">
+                    <h3 className="font-black text-slate-800 mb-4 uppercase tracking-widest text-[11px] flex items-center gap-2 drop-shadow-sm">
+                      <Users size={16} className="text-slate-500" /> Senarai Hutang Funder Luar
+                    </h3>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                       {hutangLuarBreakdown.map((f, idx) => (
+                          <div key={idx} className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-slate-200/50 border-l-4 border-l-slate-700">
+                             <p className="text-[9px] md:text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1 truncate">{f.name}</p>
+                             <p className="text-xl md:text-2xl font-black text-rose-600 tracking-tighter">RM {f.amount.toLocaleString(undefined, {minimumFractionDigits:2})}</p>
+                          </div>
+                       ))}
+                    </div>
+                 </div>
+             )}
+
+             <div className="bg-white rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm flex flex-col h-fit mt-8">
+               <div className="p-6 md:p-8 bg-slate-50/50 border-b flex justify-between items-center"><h3 className="font-black text-xl uppercase tracking-tight">Log Pindahan Wang (Ledger)</h3></div>
+               <div className="overflow-x-auto flex-1">
+                 <table className="w-full text-left min-w-[700px]"><thead className="bg-white text-slate-400 text-[9px] uppercase tracking-[0.2em] font-black sticky top-0 border-b border-slate-100"><tr><th className="px-6 py-4 md:py-5">Tarikh</th><th className="px-6 py-4 md:py-5">Jenis Transaksi</th><th className="px-6 py-4 md:py-5">Catatan</th><th className="px-6 py-4 md:py-5 text-right">Jumlah RM</th><th className="px-6 py-4 md:py-5 text-center">Aksi</th></tr></thead>
+                   <tbody className="divide-y divide-slate-50 font-bold text-[11px] md:text-xs">
+                     {([...transfersData] || []).reverse().filter(t => 
+                        // Filter ledger ikut branch supaya relevan
+                        selectedBranch === 'tamtam' 
+                          ? ['bankin_tamtam', 'modal_bros_to_tamtam', 'bayar_hutang_bros', 'modal_luar_cash', 'modal_luar_bank', 'bayar_hutang_luar', 'draw_tamtam_cash', 'draw_tamtam_bank', 'settlement'].includes(t.type)
+                          : ['bankin_bros', 'modal_bros_to_tamtam', 'bayar_hutang_bros', 'modal_luar_cash_bros', 'modal_luar_bank_bros', 'bayar_hutang_luar_bros', 'draw_bros_cash', 'draw_raudhah', 'settlement'].includes(t.type)
+                     ).map(trans => {
+                       return (
+                         <tr key={trans.id} className="hover:bg-slate-50 transition-all">
+                           <td className="px-6 py-4 md:py-5 font-black text-slate-800 whitespace-nowrap">{new Date(trans.date).toLocaleDateString('ms-MY', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
+                           <td className="px-6 py-4 md:py-5">
+                              <span className="px-2 py-1 rounded border text-[9px] uppercase tracking-widest bg-slate-100 text-slate-600 border-slate-200">
+                                 {trans.type.replace(/_/g, ' ')}
+                              </span>
+                           </td>
+                           <td className="px-6 py-4 md:py-5 text-slate-600 max-w-[300px] break-words leading-relaxed">{trans.description || '-'}</td>
+                           <td className={`px-6 py-4 md:py-5 text-right font-black whitespace-nowrap text-sm ${trans.type.includes('draw') ? 'text-rose-500' : 'text-blue-500'}`}>RM {Number(trans.amount).toFixed(2)}</td>
+                           <td className="px-6 py-4 md:py-5 text-center"><button onClick={() => setTransferToDelete(trans.id)} className="text-slate-400 hover:text-rose-500 transition-colors p-2 active:scale-90 bg-white border border-slate-200 rounded-md shadow-sm"><Trash2 size={16} /></button></td>
+                         </tr>
+                     )})}
+                     {(!transfersData || transfersData.length === 0) && <tr><td colSpan="5" className="text-center py-10 text-slate-300 italic uppercase tracking-widest text-[10px]">Tiada rekod pindahan wang / ledger</td></tr>}
+                   </tbody>
+                 </table>
+               </div>
+             </div>
+          </div>
+        )}
+
+        {/* IMPORT TAB */}
+        {activeTab === 'import' && (
+           <div className="max-w-4xl mx-auto py-4 md:py-8">
+            {!pendingSyncData ? (
+              <div className="bg-white p-6 md:p-12 rounded-3xl md:rounded-[2.5rem] border-4 border-dashed border-slate-100 flex flex-col items-center shadow-sm relative overflow-hidden text-center">
+                {uploadSuccess && (
+                  <div className="absolute inset-0 bg-white/95 flex flex-col items-center justify-center animate-in fade-in duration-300 z-10 p-6">
+                    <CheckCircle2 size={48} className="text-emerald-500 mb-4" />
+                    <h4 className="text-xl md:text-2xl font-black text-slate-800 tracking-tight tracking-tighter">Category {expectedCategory} Disync!</h4>
+                    <p className="text-sm text-slate-500 mb-8 font-bold italic">Kategori lain telah diasingkan secara automatik.</p>
+                    <button onClick={() => setUploadSuccess(false)} className="bg-blue-600 text-white px-6 md:px-8 py-3 rounded-xl font-black shadow-lg shadow-blue-200">Import Fail Baru</button>
+                  </div>
+                )}
+                <div className="w-16 h-16 md:w-20 md:h-20 bg-blue-50 text-blue-500 rounded-[1.5rem] flex items-center justify-center mb-6 shadow-inner rotate-3">
+                   <Upload size={32} className="md:w-10 md:h-10" />
+                </div>
+                <h3 className="text-xl md:text-2xl font-black mb-4 tracking-tight text-slate-800 uppercase tracking-tighter">Sync Category {expectedCategory} Sahaja</h3>
+                <p className="text-xs md:text-sm text-slate-500 mb-6 font-medium max-w-sm italic">Sila muat naik CSV 'Item Sales' Loyverse. Sistem menapis Category "{expectedCategory}" untuk bahagian ini secara automatik.</p>
+                
+                <div className="bg-slate-50 p-4 md:p-6 rounded-2xl border border-slate-200 mb-6 md:mb-8 w-full max-w-md">
+                  <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-3 gap-2">
+                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest text-left">Tarikh Rekod</label>
+                    <button 
+                      onClick={() => setImportDate(new Date().toISOString().split('T')[0])}
+                      className="text-[9px] font-black text-blue-600 bg-blue-100 px-3 py-1.5 rounded-lg hover:bg-blue-200 transition-colors shadow-sm active:scale-95 self-start sm:self-auto"
+                    >Tarikh Terkini</button>
+                  </div>
+                  <input type="date" value={importDate} onChange={(e) => setImportDate(e.target.value)} className="w-full bg-white border-2 border-slate-100 rounded-xl py-3 px-4 font-black text-slate-800 outline-none focus:border-blue-500 shadow-sm transition-all mb-3 cursor-pointer text-sm" />
+                </div>
+
+                <button onClick={triggerFileInput} disabled={isUploading} className="w-full sm:w-auto bg-slate-900 text-white px-8 md:px-10 py-3 md:py-4 rounded-2xl font-black hover:bg-black transition-all flex items-center justify-center gap-3 shadow-xl active:scale-95 text-sm">
+                  {isUploading ? <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div> : 'Pilih CSV Loyverse'}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4 md:space-y-6 animate-in slide-in-from-bottom-4 duration-300">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+                  <StatCard title="Target Earnings (Nett)" value={`RM ${pendingSyncData.summary.walkin.toFixed(2)}`} color="blue" />
+                  <StatCard title="Target Items" value={pendingSyncData.branchItems.length} color="emerald" />
+                  <StatCard title="Lain (Skipped)" value={pendingSyncData.excludedItems.length} color="orange" />
+                </div>
+
+                <div className="bg-white rounded-2xl md:rounded-[2rem] shadow-sm border border-slate-200 overflow-hidden">
+                   <div className="p-4 md:p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
+                     <h4 className="font-black text-slate-800 flex items-center gap-2 uppercase text-[10px] md:text-xs tracking-widest"><Filter size={16} className="text-blue-600" /> Semakan Loyverse</h4>
+                     <button onClick={() => setPendingSyncData(null)} className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 p-1.5 md:p-2 rounded-full transition-all active:scale-90"><X size={18} strokeWidth={3} /></button>
+                   </div>
+                   <div className="overflow-x-auto max-h-[300px] md:max-h-[400px]">
+                      <table className="w-full text-left min-w-[400px]">
+                        <thead className="bg-slate-50 text-[9px] uppercase font-black tracking-widest text-slate-400 sticky top-0"><tr><th className="px-4 py-3">Action</th><th className="px-4 py-3">Item</th><th className="px-4 py-3 text-right">Net Sales</th></tr></thead>
+                        <tbody className="divide-y divide-slate-100 font-bold text-xs">
+                          {(pendingSyncData.rawItems || []).map((item, idx) => {
+                            const isIncluded = item.category && item.category.toUpperCase().includes(expectedCategory);
+                            return (
+                            <tr key={idx} className={!isIncluded ? 'opacity-30 grayscale italic bg-slate-50' : ''}>
+                              <td className="px-4 py-3">{isIncluded ? <div className="text-emerald-600 text-[9px] uppercase">Included</div> : <div className="text-rose-400 text-[9px] uppercase">Skip</div>}</td>
+                              <td className="px-4 py-3">{item.item}</td>
+                              <td className="px-4 py-3 text-right">RM {Number(item.net_sales || 0).toFixed(2)}</td>
+                            </tr>
+                          )})}
+                        </tbody>
+                      </table>
+                   </div>
+                   <div className="p-4 md:p-6 bg-slate-50 border-t border-slate-100 flex flex-col sm:flex-row justify-end gap-3">
+                      <button onClick={() => setPendingSyncData(null)} className="px-6 py-3 rounded-xl border-2 border-slate-200 font-black text-slate-500">Batal</button>
+                      <button onClick={handleConfirmSync} className="px-6 py-3 rounded-xl bg-slate-900 text-white font-black"><Check size={18} className="inline mr-2"/> Sah & Sync Jualan</button>
+                   </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+      </div>
+      <style dangerouslySetInnerHTML={{ __html: `
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; } 
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; } 
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; }
+        
+        body {
+          background-color: #0f172a;
+          margin: 0;
+          min-height: 100vh;
+        }
+
+        body::before {
+          content: "";
+          position: fixed;
+          top: -50%;
+          left: -50%;
+          width: 200%;
+          height: 200%;
+          background: radial-gradient(circle, rgba(255,0,0,0.2), transparent 60%);
+          animation: floatGlow 10s infinite alternate ease-in-out;
+          pointer-events: none;
+          z-index: -1;
+        }
+
+        @keyframes floatGlow {
+          0% { transform: translate(-10%, -10%); }
+          100% { transform: translate(10%, 10%); }
+        }
+      `}} />
+    </div>
+  );
+};
+
+const SidebarItem = ({ icon, label, active, onClick }) => (
+  <button onClick={onClick} className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl transition-all ${active ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}>
+    {icon}<span className="font-black text-[11px] uppercase tracking-widest">{label}</span>
+  </button>
+);
+
+const StatCard = ({ title, value, color, progress, icon }) => {
+  const styles = { blue: 'border-l-blue-600 bg-blue-50/20 text-blue-700', emerald: 'border-l-emerald-600 bg-emerald-50/20 text-emerald-700', orange: 'border-l-orange-600 bg-orange-50/20 text-orange-700', purple: 'border-l-purple-600 bg-purple-50/20 text-purple-700', slate: 'border-l-slate-800 bg-slate-50/20 text-slate-800' };
+  return (
+    <div className={`bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 border-l-[10px] ${styles[color]} shadow-sm transition-transform hover:scale-[1.01]`}>
+      <div className="flex justify-between items-start mb-4">
+        <h4 className="text-slate-400 text-[10px] font-black uppercase tracking-[0.2em] leading-relaxed">{title}</h4>
+        {icon && <div className="text-slate-300">{icon}</div>}
+      </div>
+      <div className="text-2xl md:text-3xl font-black text-slate-900 tracking-tighter">{value}</div>
+      {progress !== undefined && <div className="mt-4 md:mt-6 w-full bg-slate-100 h-2 md:h-2.5 rounded-full overflow-hidden border border-slate-200 shadow-inner"><div className="bg-orange-500 h-full shadow-[0_0_15px_rgba(249,115,22,0.4)] transition-all duration-1000" style={{ width: `${Math.min(progress, 100)}%` }}></div></div>}
+    </div>
+  );
+};
+
+// Input Biasa (Tema Terang)
+const InputField = ({ label, prefix, value, onChange, placeholder = "0", type }) => {
+  const hasPrefix = prefix && prefix !== "";
+  const inputType = type || (prefix === "RM" ? "number" : "text");
+  return (
+    <div>
+      <label className="block text-[10px] font-black text-slate-500 mb-2 uppercase tracking-widest">{label}</label>
+      <div className="relative">
+        {hasPrefix && <span className="absolute left-5 inset-y-0 flex items-center text-slate-400 font-black">{prefix}</span>}
+        <input type={inputType} value={value} onChange={(e) => onChange(e.target.value)} className={`w-full bg-slate-50 border-2 border-slate-100 rounded-2xl py-4 pl-12 pr-5 font-black text-slate-800 outline-none focus:border-blue-500 shadow-inner`} placeholder={placeholder} />
+      </div>
+    </div>
+  );
+};
+
+// Input Khas Untuk Dashboard Global (Tema Gelap)
+const InputFieldDark = ({ label, prefix, value, onChange, placeholder = "0", type }) => {
+  const hasPrefix = prefix && prefix !== "";
+  const inputType = type || (prefix === "RM" ? "number" : "text");
+  return (
+    <div>
+      <label className="block text-[10px] font-black text-slate-300 mb-2 uppercase tracking-widest drop-shadow">{label}</label>
+      <div className="relative">
+        {hasPrefix && <span className="absolute left-4 inset-y-0 flex items-center text-slate-500 font-black">{prefix}</span>}
+        <input type={inputType} value={value} onChange={(e) => onChange(e.target.value)} className={`w-full bg-slate-900/80 backdrop-blur-md border border-slate-600 rounded-xl py-3 pl-12 pr-4 font-black text-white outline-none focus:border-blue-500 shadow-inner text-sm transition-colors`} placeholder={placeholder} />
+      </div>
+    </div>
+  );
+};
+
+export default App;
